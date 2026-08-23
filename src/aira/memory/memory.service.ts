@@ -13,15 +13,9 @@ export class MemoryService {
       throw new Error('DATABASE_URL is not configured');
     }
 
-    const dbUrl = new URL(databaseUrl);
-
-    const adapter = new PrismaPg({
-      host: dbUrl.hostname,
-      port: Number(dbUrl.port),
-      user: dbUrl.username,
-      password: dbUrl.password,
-      database: dbUrl.pathname.slice(1),
-    });
+   const adapter = new PrismaPg({
+  connectionString: databaseUrl,
+});
 
     this.prisma = new PrismaClient({
       adapter,
