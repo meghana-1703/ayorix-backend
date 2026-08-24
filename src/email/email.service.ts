@@ -1,116 +1,111 @@
-import { Injectable, InternalServerErrorException } from '@nestjs/common';
-import { Resend } from 'resend';
-import * as dns from 'dns';
+import {
+  Injectable,
+  InternalServerErrorException,
+} from '@nestjs/common';
+import * as nodemailer from 'nodemailer';
 
 @Injectable()
 export class EmailService {
-private readonly resend: Resend;
+  private readonly transporter: nodemailer.Transporter;
 
-constructor() {
-  this.resend = new Resend(process.env.RESEND_API_KEY);
-}
-
- async sendProposalEmail(params: {
-  to: string;
-  clientName: string;
-  proposal: any;
-}) {
-  const { to, clientName, proposal } = params;
-
-  if (!to) {
-    throw new InternalServerErrorException(
-      'Client email is required',
-    );
+  constructor() {
+    this.transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        type: 'OAuth2',
+        user: process.env.GMAIL_USER,
+        clientId: process.env.GMAIL_CLIENT_ID,
+        clientSecret: process.env.GMAIL_CLIENT_SECRET,
+        refreshToken: process.env.GMAIL_REFRESH_TOKEN,
+      },
+    });
   }
 
-  try {
-    const { data, error } = await this.resend.emails.send({
-      from: 'AYORIX <hello.ayorix@gmail.com>',
-      to: [to],
-      subject:
-        proposal?.title ||
-        'Your AYORIX Project Proposal',
-      text: this.buildProposalText(
-        clientName,
-        proposal,
-      ),
-      html: this.buildProposalHtml(
-        clientName,
-        proposal,
-      ),
-    });
+  async sendProposalEmail(params: {
+    to: string;
+    clientName: string;
+    proposal: any;
+  }) {
+    const { to, clientName, proposal } = params;
 
-    if (error) {
+    if (!to) {
+      throw new InternalServerErrorException(
+        'Client email is required',
+      );
+    }
+
+    try {
+      const info = await this.transporter.sendMail({
+        from: `"AYORIX" <${process.env.GMAIL_USER}>`,
+        to,
+        subject:
+          proposal?.title ||
+          'Your AYORIX Project Proposal',
+        text: this.buildProposalText(
+          clientName,
+          proposal,
+        ),
+        html: this.buildProposalHtml(
+          clientName,
+          proposal,
+        ),
+      });
+
+      console.log('[AIRA EMAIL] Proposal sent:', {
+        to,
+        messageId: info.messageId,
+      });
+
+      return {
+        success: true,
+        messageId: info.messageId,
+      };
+    } catch (error) {
       console.error(
-        '[AIRA EMAIL] Resend failed:',
+        '[AIRA EMAIL] Gmail OAuth send failed:',
         error,
       );
 
       throw new InternalServerErrorException(
-        error.message || 'Failed to send proposal email',
+        'Failed to send proposal email',
       );
     }
-
-    console.log('[AIRA EMAIL] Proposal sent:', {
-      to,
-      id: data?.id,
-    });
-
-    return {
-      success: true,
-      messageId: data?.id,
-    };
-  } catch (error) {
-    console.error(
-      '[AIRA EMAIL] Failed to send proposal:',
-      error,
-    );
-
-    if (error instanceof InternalServerErrorException) {
-      throw error;
-    }
-
-    throw new InternalServerErrorException(
-      'Failed to send proposal email',
-    );
   }
-}
 
   async testConnection() {
-  try {
-    // Resend's Emails client does not expose a `verify` method. Use a
-    // read-only domains request to validate the configured connection.
-    await this.resend.domains.list();
+    try {
+      await this.transporter.verify();
 
-    console.log('[AIRA EMAIL] Resend connection successful');
+      console.log(
+        '[AIRA EMAIL] Gmail OAuth connection successful',
+      );
 
-    return {
-      success: true,
-      message: 'Resend connection successful',
-    };
-} catch (error) {
-  console.error(
-    '[AIRA EMAIL] Resend connection failed:',
-    error,
-  );
+      return {
+        success: true,
+        message:
+          'Gmail OAuth connection successful',
+      };
+    } catch (error) {
+      console.error(
+        '[AIRA EMAIL] Gmail OAuth connection failed:',
+        error,
+      );
 
-  return {
-    success: false,
-    message:
-      error instanceof Error
-        ? error.message
-        : String(error),
-    code: (error as any)?.code,
-    command: (error as any)?.command,
-  };
-}
-}
+      return {
+        success: false,
+        message:
+          error instanceof Error
+            ? error.message
+            : String(error),
+      };
+    }
+  }
 
   private buildProposalText(
-  clientName: string,
-  proposal: any,
-): string {
-  return `
+    clientName: string,
+    proposal: any,
+  ): string {
+    return `
 AYORIX
 Digital Solutions
 
@@ -126,16 +121,29 @@ PROJECT
 ${proposal?.title || 'Website Project'}
 
 PROJECT SUMMARY
-${proposal?.projectSummary || 'A tailored digital solution based on the discussed requirements.'}
+${
+  proposal?.projectSummary ||
+  'A tailored digital solution based on the discussed requirements.'
+}
 
 SCOPE
-${(proposal?.scope || []).map((item: string) => `• ${item}`).join('\n') || 'To be confirmed'}
+${
+  (proposal?.scope || [])
+    .map((item: string) => `• ${item}`)
+    .join('\n') || 'To be confirmed'
+}
 
 TECHNOLOGY
-${(proposal?.technology || []).join(', ') || 'To be confirmed'}
+${
+  (proposal?.technology || []).join(', ') ||
+  'To be confirmed'
+}
 
 SEO
-${(proposal?.seo || []).join(', ') || 'To be confirmed'}
+${
+  (proposal?.seo || []).join(', ') ||
+  'To be confirmed'
+}
 
 TIMELINE
 ${proposal?.timeline || 'To be confirmed'}
@@ -146,7 +154,10 @@ ${proposal?.budget || 'To be confirmed'}
 Please note: This is an estimated project cost based on the requirements discussed. The final project cost will be confirmed by AYORIX after reviewing the complete requirements.
 
 NEXT STEP
-${proposal?.nextStep || 'AYORIX will review your project details and reach out to you shortly.'}
+${
+  proposal?.nextStep ||
+  'AYORIX will review your project details and reach out to you shortly.'
+}
 
 If you have any questions or would like to discuss anything further, simply reply to this email.
 
@@ -157,23 +168,28 @@ Digital Solutions
 
 Built on Values. Driven by Innovation.
 `.trim();
-}
+  }
 
-private buildProposalHtml(
-  clientName: string,
-  proposal: any,
-): string {
-  const scope = proposal?.scope || [];
-  const technology = proposal?.technology || [];
-  const seo = proposal?.seo || [];
+  private buildProposalHtml(
+    clientName: string,
+    proposal: any,
+  ): string {
+    const scope = proposal?.scope || [];
+    const technology = proposal?.technology || [];
+    const seo = proposal?.seo || [];
 
-  return `
+    return `
 <!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>${proposal?.title || 'AYORIX Project Proposal'}</title>
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  />
+  <title>
+    ${proposal?.title || 'AYORIX Project Proposal'}
+  </title>
 </head>
 
 <body
@@ -193,7 +209,11 @@ private buildProposalHtml(
       cellpadding="0"
       cellspacing="0"
       border="0"
-      style="max-width:680px;margin:0 auto;background:#ffffff;"
+      style="
+        max-width:680px;
+        margin:0 auto;
+        background:#ffffff;
+      "
     >
 
       <!-- HEADER -->
@@ -315,7 +335,10 @@ private buildProposalHtml(
                 color:#333333;
               "
             >
-              ${proposal?.projectSummary || 'A tailored digital solution based on the discussed requirements.'}
+              ${
+                proposal?.projectSummary ||
+                'A tailored digital solution based on the discussed requirements.'
+              }
             </div>
 
           </div>
@@ -341,6 +364,7 @@ private buildProposalHtml(
 
           <!-- SCOPE -->
           <div style="margin-bottom:25px;">
+
             <div
               style="
                 font-size:12px;
@@ -372,10 +396,12 @@ private buildProposalHtml(
                   : '<li>To be confirmed</li>'
               }
             </ul>
+
           </div>
 
           <!-- TECHNOLOGY -->
           <div style="margin-bottom:25px;">
+
             <div
               style="
                 font-size:12px;
@@ -400,10 +426,12 @@ private buildProposalHtml(
                   : 'To be confirmed'
               }
             </div>
+
           </div>
 
           <!-- SEO -->
           <div style="margin-bottom:25px;">
+
             <div
               style="
                 font-size:12px;
@@ -428,6 +456,7 @@ private buildProposalHtml(
                   : 'To be confirmed'
               }
             </div>
+
           </div>
 
         </td>
@@ -443,6 +472,7 @@ private buildProposalHtml(
             cellspacing="0"
             border="0"
           >
+
             <tr>
 
               <td
@@ -453,6 +483,7 @@ private buildProposalHtml(
                   border:1px solid #eeeeee;
                 "
               >
+
                 <div
                   style="
                     font-size:9px;
@@ -474,6 +505,7 @@ private buildProposalHtml(
                 >
                   ${proposal?.timeline || 'To be confirmed'}
                 </div>
+
               </td>
 
               <td width="14"></td>
@@ -486,6 +518,7 @@ private buildProposalHtml(
                   border:1px solid #eeeeee;
                 "
               >
+
                 <div
                   style="
                     font-size:9px;
@@ -507,9 +540,11 @@ private buildProposalHtml(
                 >
                   ${proposal?.budget || 'To be confirmed'}
                 </div>
+
               </td>
 
             </tr>
+
           </table>
 
         </td>
@@ -526,6 +561,7 @@ private buildProposalHtml(
               background:#faf9ff;
             "
           >
+
             <div
               style="
                 font-size:12px;
@@ -538,6 +574,7 @@ private buildProposalHtml(
               will be confirmed by AYORIX after reviewing the
               complete requirements.
             </div>
+
           </div>
 
         </td>
@@ -567,7 +604,10 @@ private buildProposalHtml(
               color:#444444;
             "
           >
-            ${proposal?.nextStep || 'AYORIX will review your project details and reach out to you shortly.'}
+            ${
+              proposal?.nextStep ||
+              'AYORIX will review your project details and reach out to you shortly.'
+            }
           </p>
 
           <p
@@ -637,5 +677,5 @@ private buildProposalHtml(
 </body>
 </html>
 `.trim();
-}
+  }
 }
