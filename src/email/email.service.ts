@@ -81,17 +81,22 @@ export class EmailService {
       success: true,
       message: 'SMTP connection successful',
     };
-  } catch (error) {
-    console.error(
-      '[AIRA EMAIL] SMTP connection failed:',
-      error,
-    );
+} catch (error) {
+  console.error(
+    '[AIRA EMAIL] SMTP connection failed:',
+    error,
+  );
 
-    return {
-      success: false,
-      message: 'SMTP connection failed',
-    };
-  }
+  return {
+    success: false,
+    message:
+      error instanceof Error
+        ? error.message
+        : String(error),
+    code: (error as any)?.code,
+    command: (error as any)?.command,
+  };
+}
 }
 
   private buildProposalText(
