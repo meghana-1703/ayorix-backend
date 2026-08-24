@@ -1,41 +1,32 @@
 import { Injectable, InternalServerErrorException } from '@nestjs/common';
-import * as nodemailer from 'nodemailer';
+import { Resend } from 'resend';
 import * as dns from 'dns';
 
 @Injectable()
 export class EmailService {
-  private readonly transporter;
+private readonly resend: Resend;
 
- constructor() {
-  dns.setDefaultResultOrder('ipv4first');
-
-  this.transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT),
-    secure: process.env.SMTP_SECURE === 'true',
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
-  });
+constructor() {
+  this.resend = new Resend(process.env.RESEND_API_KEY);
 }
 
-  async sendProposalEmail(params: {
-    to: string;
-    clientName: string;
-    proposal: any;
-  }) {
-    const { to, clientName, proposal } = params;
+ async sendProposalEmail(params: {
+  to: string;
+  clientName: string;
+  proposal: any;
+}) {
+  const { to, clientName, proposal } = params;
 
-    if (!to) {
-      throw new InternalServerErrorException(
-        'Client email is required',
-      );
-    }
+  if (!to) {
+    throw new InternalServerErrorException(
+      'Client email is required',
+    );
+  }
 
-    const mail = {
-      from: `"AYORIX" <${process.env.SMTP_USER}>`,
-      to,
+  try {
+    const { data, error } = await this.resend.emails.send({
+      from: 'AYORIX <hello.ayorix@gmail.com>',
+      to: [to],
       subject:
         proposal?.title ||
         'Your AYORIX Project Proposal',
@@ -47,46 +38,59 @@ export class EmailService {
         clientName,
         proposal,
       ),
-    };
+    });
 
-    try {
-      const result =
-        await this.transporter.sendMail(mail);
-
-      console.log('[AIRA EMAIL] Proposal sent:', {
-        to,
-        messageId: result.messageId,
-      });
-
-      return {
-        success: true,
-        messageId: result.messageId,
-      };
-    } catch (error) {
+    if (error) {
       console.error(
-        '[AIRA EMAIL] Failed to send proposal:',
+        '[AIRA EMAIL] Resend failed:',
         error,
       );
 
       throw new InternalServerErrorException(
-        'Failed to send proposal email',
+        error.message || 'Failed to send proposal email',
       );
     }
-  }
 
-  async testConnection() {
-  try {
-    await this.transporter.verify();
-
-    console.log('[AIRA EMAIL] SMTP connection successful');
+    console.log('[AIRA EMAIL] Proposal sent:', {
+      to,
+      id: data?.id,
+    });
 
     return {
       success: true,
-      message: 'SMTP connection successful',
+      messageId: data?.id,
+    };
+  } catch (error) {
+    console.error(
+      '[AIRA EMAIL] Failed to send proposal:',
+      error,
+    );
+
+    if (error instanceof InternalServerErrorException) {
+      throw error;
+    }
+
+    throw new InternalServerErrorException(
+      'Failed to send proposal email',
+    );
+  }
+}
+
+  async testConnection() {
+  try {
+    // Resend's Emails client does not expose a `verify` method. Use a
+    // read-only domains request to validate the configured connection.
+    await this.resend.domains.list();
+
+    console.log('[AIRA EMAIL] Resend connection successful');
+
+    return {
+      success: true,
+      message: 'Resend connection successful',
     };
 } catch (error) {
   console.error(
-    '[AIRA EMAIL] SMTP connection failed:',
+    '[AIRA EMAIL] Resend connection failed:',
     error,
   );
 
