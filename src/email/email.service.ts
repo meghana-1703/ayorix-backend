@@ -78,7 +78,7 @@ export class EmailService {
     try {
       const { data, error } =
         await this.resend.emails.send({
-          from: 'AYORIX <hello@ayorix.in>',
+          from: `AYORIX <${process.env.RESEND_FROM_EMAIL}>`,
           to,
           subject:
             proposal?.title ||
