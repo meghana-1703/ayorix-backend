@@ -2,24 +2,65 @@ import {
   Injectable,
   InternalServerErrorException,
 } from '@nestjs/common';
-import * as nodemailer from 'nodemailer';
+import { Resend } from 'resend';
 
 @Injectable()
 export class EmailService {
-  private readonly transporter: nodemailer.Transporter;
+  private readonly resend: Resend;
 
   constructor() {
-    this.transporter = nodemailer.createTransport({
-      service: 'gmail',
-      auth: {
-        type: 'OAuth2',
-        user: process.env.GMAIL_USER,
-        clientId: process.env.GMAIL_CLIENT_ID,
-        clientSecret: process.env.GMAIL_CLIENT_SECRET,
-        refreshToken: process.env.GMAIL_REFRESH_TOKEN,
-      },
-    });
+    const apiKey = process.env.RESEND_API_KEY;
+
+    if (!apiKey) {
+      throw new Error(
+        'RESEND_API_KEY is not configured',
+      );
+    }
+
+    this.resend = new Resend(apiKey);
   }
+
+  async testConnection() {
+  try {
+    const { data, error } =
+      await this.resend.domains.list();
+
+    if (error) {
+      console.error(
+        '[AIRA EMAIL] Resend connection failed:',
+        error,
+      );
+
+      return {
+        success: false,
+        message: error.message,
+      };
+    }
+
+    console.log(
+      '[AIRA EMAIL] Resend connection successful',
+    );
+
+    return {
+      success: true,
+      message: 'Resend connection successful',
+      domains: data,
+    };
+  } catch (error) {
+    console.error(
+      '[AIRA EMAIL] Resend connection failed:',
+      error,
+    );
+
+    return {
+      success: false,
+      message:
+        error instanceof Error
+          ? error.message
+          : String(error),
+    };
+  }
+}
 
   async sendProposalEmail(params: {
     to: string;
@@ -35,69 +76,58 @@ export class EmailService {
     }
 
     try {
-      const info = await this.transporter.sendMail({
-        from: `"AYORIX" <${process.env.GMAIL_USER}>`,
-        to,
-        subject:
-          proposal?.title ||
-          'Your AYORIX Project Proposal',
-        text: this.buildProposalText(
-          clientName,
-          proposal,
-        ),
-        html: this.buildProposalHtml(
-          clientName,
-          proposal,
-        ),
-      });
+      const { data, error } =
+        await this.resend.emails.send({
+          from: 'AYORIX <hello@ayorix.in>',
+          to,
+          subject:
+            proposal?.title ||
+            'Your AYORIX Project Proposal',
+          text: this.buildProposalText(
+            clientName,
+            proposal,
+          ),
+          html: this.buildProposalHtml(
+            clientName,
+            proposal,
+          ),
+        });
+
+      if (error) {
+        console.error(
+          '[AIRA EMAIL] Resend send failed:',
+          error,
+        );
+
+        throw new InternalServerErrorException(
+          'Failed to send proposal email',
+        );
+      }
 
       console.log('[AIRA EMAIL] Proposal sent:', {
         to,
-        messageId: info.messageId,
+        messageId: data?.id,
       });
 
       return {
         success: true,
-        messageId: info.messageId,
+        messageId: data?.id,
       };
     } catch (error) {
       console.error(
-        '[AIRA EMAIL] Gmail OAuth send failed:',
+        '[AIRA EMAIL] Resend error:',
         error,
       );
+
+      if (
+        error instanceof InternalServerErrorException
+      ) {
+        throw error;
+      }
 
       throw new InternalServerErrorException(
         'Failed to send proposal email',
       );
-    }
-  }
-
-  async testConnection() {
-    try {
-      await this.transporter.verify();
-
-      console.log(
-        '[AIRA EMAIL] Gmail OAuth connection successful',
-      );
-
-      return {
-        success: true,
-        message:
-          'Gmail OAuth connection successful',
-      };
-    } catch (error) {
-      console.error(
-        '[AIRA EMAIL] Gmail OAuth connection failed:',
-        error,
-      );
-
-      return {
-        success: false,
-        message:
-          error instanceof Error
-            ? error.message
-            : String(error),
-      };
     }
   }
 
