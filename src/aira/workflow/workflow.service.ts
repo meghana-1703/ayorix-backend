@@ -29,9 +29,7 @@ export class WorkflowService {
         ? missingInformation[0]
         : undefined;
 
-    const shouldAskQuestion =
-      missingInformation.length > 0 &&
-      currentStage !== 'COMPLETE';
+    const shouldAskQuestion = false;
 
     const nextStage =
       this.getNextStage(
