@@ -38,21 +38,20 @@ export class AiraOrchestratorService {
   }) {
     let client = input.client;
     let project = input.project;
-
     let history = input.conversationHistory ?? [];
 
     const message = input.message?.trim() ?? '';
 
     /*
-     * ========================================================
+     * ==========================================================
      * EMPTY MESSAGE
-     * ========================================================
+     * ==========================================================
      */
 
     if (!message) {
       return this.finalResponse(
         input,
-        this.greetingMessage('en'),
+        this.getWelcomeMessage('en'),
         {
           intent: 'GENERAL_QUESTION',
           confidence: 1,
@@ -64,13 +63,18 @@ export class AiraOrchestratorService {
         },
         project,
         client,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        this.getFirstQuestionOptions(),
       );
     }
 
     /*
-     * ========================================================
-     * LOAD MEMORY
-     * ========================================================
+     * ==========================================================
+     * LOAD CONVERSATION MEMORY
+     * ==========================================================
      */
 
     if (input.conversationId) {
@@ -93,6 +97,7 @@ export class AiraOrchestratorService {
       }
 
       project = conversation.project;
+
       history = conversation.messages ?? [];
 
       client =
@@ -108,9 +113,7 @@ export class AiraOrchestratorService {
       this.intentService.detect(message);
 
     /*
-     * ========================================================
-     * SAVE USER MESSAGE
-     * ========================================================
+     * Save user message.
      */
 
     if (input.conversationId) {
@@ -126,54 +129,72 @@ export class AiraOrchestratorService {
     }
 
     /*
-     * ========================================================
-     * FIRST GREETING
-     * ========================================================
-     */
-
-    if (
-      this.isGreeting(message) &&
-      !this.hasStartedProject(project, client)
-    ) {
-      return this.finalResponse(
-        input,
-        this.greetingMessage(language),
-        intent,
-        {
-          advisor: 'discovery',
-          action: 'start_discovery',
-          nextStep: 'collect_name',
-        },
-        project,
-        client,
-        undefined,
-        undefined,
-        {
-          currentStage: 'DISCOVERY',
-          nextStage: 'DISCOVERY',
-          shouldAskQuestion: true,
-          nextMissingField: 'clientName',
-          missingInformation: ['clientName'],
-        },
-        undefined,
-        [],
-      );
-    }
-
-    /*
-     * ========================================================
-     * GREETING DURING ACTIVE FLOW
-     * ========================================================
+     * ==========================================================
+     * GREETING
+     * ==========================================================
+     *
+     * Greeting must NOT restart an existing consultation.
+     *
+     * If this is a genuinely new conversation, return the first
+     * question.
      */
 
     if (this.isGreeting(message)) {
+      const hasProgress =
+        Boolean(
+          client?.name ||
+          client?.email ||
+          client?.phone ||
+          project?.name ||
+          project?.industry ||
+          project?.projectType ||
+          project?.goal ||
+          project?.audience ||
+          this.toList(project?.features).length > 0 ||
+          project?.technology ||
+          project?.seo ||
+          project?.timeline,
+        );
+
+      if (!hasProgress) {
+        return this.finalResponse(
+          input,
+          this.getWelcomeMessage(language),
+          {
+            intent: 'GENERAL_QUESTION',
+            confidence: 1,
+          },
+          {
+            advisor: 'discovery',
+            action: 'start_discovery',
+            nextStep: 'collect_client_name',
+          },
+          project,
+          client,
+          undefined,
+          undefined,
+          {
+            currentStage: 'DISCOVERY',
+            nextStage: 'DISCOVERY',
+            shouldAskQuestion: true,
+            missingInformation: ['clientName'],
+            nextMissingField: 'clientName',
+          },
+          undefined,
+          this.getQuestionOptions(
+            'clientName',
+            language,
+          ),
+        );
+      }
+
       return this.finalResponse(
         input,
-        language === 'te-en'
-          ? 'Hi! Manam mana website project continue cheddham. 😊'
-          : language === 'te'
-            ? 'హాయ్! మన website project ని continue చేద్దాం. 😊'
-            : 'Hi! Let’s continue with your website project. 😊',
+        language === 'te'
+          ? 'సరే. మన project consultation continue చేద్దాం.'
+          : language === 'te-en'
+            ? 'Sare. Mana project consultation continue cheddam.'
+            : 'Sure. Let’s continue with your project consultation.',
         intent,
         this.decisionService.decide(
           intent.intent,
@@ -184,19 +205,19 @@ export class AiraOrchestratorService {
     }
 
     /*
-     * ========================================================
+     * ==========================================================
      * THANKS
-     * ========================================================
+     * ==========================================================
      */
 
     if (this.isThanks(message)) {
       return this.finalResponse(
         input,
-        language === 'te-en'
-          ? 'You’re welcome! 😊'
-          : language === 'te'
-            ? 'మీకు స్వాగతం! 😊'
-            : 'You’re welcome! 😊',
+        language === 'te'
+          ? 'మీకు సహాయం చేయడం ఆనందంగా ఉంది. ❤️'
+          : language === 'te-en'
+            ? 'Meeku help cheyyadam happy ga undi. ❤️'
+            : 'Happy to help. ❤️',
         intent,
         this.decisionService.decide(
           intent.intent,
@@ -207,9 +228,9 @@ export class AiraOrchestratorService {
     }
 
     /*
-     * ========================================================
-     * DIRECT CLIENT EXTRACTION
-     * ========================================================
+     * ==========================================================
+     * EXTRACT DIRECT CLIENT DETAILS
+     * ==========================================================
      */
 
     if (input.clientId) {
@@ -229,37 +250,37 @@ export class AiraOrchestratorService {
           );
       }
 
-      const extractedEmail =
+      const email =
         this.extractEmail(message);
 
-      if (extractedEmail) {
+      if (email) {
         client =
           await this.memoryService.updateClient(
             input.clientId,
             {
-              email: extractedEmail,
+              email,
             },
           );
       }
 
-      const extractedPhone =
+      const phone =
         this.extractPhoneNumber(message);
 
-      if (extractedPhone) {
+      if (phone) {
         client =
           await this.memoryService.updateClient(
             input.clientId,
             {
-              phone: extractedPhone,
+              phone,
             },
           );
       }
     }
 
     /*
-     * ========================================================
-     * CURRENT WORKFLOW BEFORE ANSWER
-     * ========================================================
+     * ==========================================================
+     * CURRENT WORKFLOW
+     * ==========================================================
      */
 
     let workflow =
@@ -272,22 +293,27 @@ export class AiraOrchestratorService {
       workflow.nextMissingField;
 
     /*
-     * ========================================================
-     * SAVE ANSWER TO EXACT FIELD
-     * ========================================================
+     * ==========================================================
+     * SAVE ANSWER TO EXPECTED FIELD
+     * ==========================================================
+     *
+     * IMPORTANT:
+     *
+     * The answer is ALWAYS mapped to the field AIRA asked for.
+     *
+     * This prevents:
+     *
+     * phone -> industry
+     * business name -> phone
+     * industry -> business name
+     *
+     * etc.
      */
 
     if (
       input.clientId &&
       expectedField
     ) {
-      /*
-       * OTHER CUSTOM INPUT
-       *
-       * If frontend sends the actual custom value,
-       * save it to the field currently being asked.
-       */
-
       const answerData =
         this.buildAnswerData(
           expectedField,
@@ -298,11 +324,9 @@ export class AiraOrchestratorService {
       if (
         Object.keys(answerData).length > 0
       ) {
-        /*
-         * CLIENT NAME
-         */
-
-        if (answerData.__clientName) {
+        if (
+          answerData.__clientName
+        ) {
           client =
             await this.memoryService.updateClient(
               input.clientId,
@@ -313,11 +337,9 @@ export class AiraOrchestratorService {
             );
         }
 
-        /*
-         * PHONE
-         */
-
-        if (answerData.__phone) {
+        if (
+          answerData.__phone
+        ) {
           client =
             await this.memoryService.updateClient(
               input.clientId,
@@ -327,10 +349,6 @@ export class AiraOrchestratorService {
               },
             );
         }
-
-        /*
-         * PROJECT
-         */
 
         const projectData = {
           ...answerData,
@@ -353,9 +371,9 @@ export class AiraOrchestratorService {
     }
 
     /*
-     * ========================================================
+     * ==========================================================
      * REFRESH MEMORY
-     * ========================================================
+     * ==========================================================
      */
 
     if (
@@ -369,7 +387,8 @@ export class AiraOrchestratorService {
         );
 
       if (refreshed?.project) {
-        project = refreshed.project;
+        project =
+          refreshed.project;
       }
 
       const refreshedClient =
@@ -378,7 +397,8 @@ export class AiraOrchestratorService {
         );
 
       if (refreshedClient) {
-        client = refreshedClient;
+        client =
+          refreshedClient;
       }
 
       history =
@@ -386,9 +406,9 @@ export class AiraOrchestratorService {
     }
 
     /*
-     * ========================================================
+     * ==========================================================
      * WORKFLOW AFTER ANSWER
-     * ========================================================
+     * ==========================================================
      */
 
     workflow =
@@ -398,9 +418,9 @@ export class AiraOrchestratorService {
       });
 
     /*
-     * ========================================================
+     * ==========================================================
      * AUTOMATIC PRICE + TIMELINE CALCULATION
-     * ========================================================
+     * ==========================================================
      */
 
     let pricing: any;
@@ -444,8 +464,8 @@ export class AiraOrchestratorService {
         });
 
       /*
-       * PRICE IS AUTOMATIC.
-       * NEVER ASK USER FOR BUDGET.
+       * Price is automatic.
+       * NEVER ask user for budget.
        */
 
       if (
@@ -465,9 +485,9 @@ export class AiraOrchestratorService {
     }
 
     /*
-     * ========================================================
+     * ==========================================================
      * REFRESH WORKFLOW AGAIN
-     * ========================================================
+     * ==========================================================
      */
 
     workflow =
@@ -477,159 +497,19 @@ export class AiraOrchestratorService {
       });
 
     /*
-     * ========================================================
-     * QUESTIONNAIRE
+     * ==========================================================
+     * PROPOSAL DECISION
+     * ==========================================================
      *
-     * ONE QUESTION ONLY
-     * ========================================================
-     */
-
-    if (
-      workflow.shouldAskQuestion &&
-      workflow.nextMissingField
-    ) {
-      const field =
-        workflow.nextMissingField;
-
-      /*
-       * EMAIL IS SPECIAL.
-       *
-       * Email must ONLY be asked after
-       * user explicitly clicks "Yes, send proposal".
-       */
-
-      if (field === 'email') {
-        /*
-         * Do not expose email question from normal
-         * questionnaire unless proposal confirmation
-         * already happened.
-         */
-
-        if (
-          !this.isWaitingForProposalDecision(
-            history,
-          )
-        ) {
-          return this.finalResponse(
-            input,
-            this.buildCompleteMessage(
-              project,
-              pricing,
-              timeline,
-              language,
-            ),
-            {
-              intent: 'PROPOSAL',
-              confidence: 1,
-            },
-            {
-              advisor: 'proposal',
-              action: 'prepare_proposal',
-              nextStep: 'confirm_proposal',
-            },
-            project,
-            client,
-            pricing,
-            timeline,
-            {
-              currentStage: 'PROPOSAL',
-              nextStage: 'PROPOSAL',
-              shouldAskQuestion: false,
-              nextMissingField: undefined,
-              missingInformation: [],
-            },
-            undefined,
-            this.getProposalConfirmationOptions(
-              language,
-            ),
-          );
-        }
-      }
-
-      /*
-       * Normal question.
-       */
-
-      return this.finalResponse(
-        input,
-        this.questionText(
-          field,
-          language,
-        ),
-        intent,
-        this.decisionService.decide(
-          intent.intent,
-        ),
-        project,
-        client,
-        pricing,
-        timeline,
-        workflow,
-        undefined,
-        this.getQuestionOptions(
-          field,
-          language,
-        ),
-      );
-    }
-
-    /*
-     * ========================================================
-     * REQUIREMENTS COMPLETE
-     * ========================================================
+     * Proposal is NEVER generated in chat.
      *
-     * IMPORTANT:
-     * DO NOT GENERATE PROPOSAL HERE.
+     * Proposal is generated ONLY after:
      *
-     * Only show clean summary and confirmation buttons.
-     */
-
-    if (
-      !workflow.nextMissingField
-    ) {
-      return this.finalResponse(
-        input,
-        this.buildCompleteMessage(
-          project,
-          pricing,
-          timeline,
-          language,
-        ),
-        {
-          intent: 'PROPOSAL',
-          confidence: 1,
-        },
-        {
-          advisor: 'proposal',
-          action: 'prepare_proposal',
-          nextStep: 'confirm_proposal',
-        },
-        project,
-        client,
-        pricing,
-        timeline,
-        {
-          ...workflow,
-          currentStage: 'PROPOSAL',
-          nextStage: 'PROPOSAL',
-          shouldAskQuestion: false,
-          nextMissingField: undefined,
-          missingInformation: [],
-        },
-        undefined,
-        this.getProposalConfirmationOptions(
-          language,
-        ),
-      );
-    }
-
-    /*
-     * ========================================================
-     * PROPOSAL CONFIRMATION
-     * ========================================================
+     * Yes -> email asked
+     * email received -> proposal generated
+     * proposal -> email sent
      *
-     * This block must execute BEFORE generic
-     * questionnaire handling.
+     * Chat receives ONLY confirmation.
      */
 
     if (
@@ -638,9 +518,9 @@ export class AiraOrchestratorService {
       )
     ) {
       /*
-       * ------------------------------------------------------
-       * YES → SEND PROPOSAL
-       * ------------------------------------------------------
+       * --------------------------------------------------------
+       * YES / SEND PROPOSAL
+       * --------------------------------------------------------
        */
 
       if (
@@ -649,7 +529,8 @@ export class AiraOrchestratorService {
         )
       ) {
         /*
-         * EMAIL MISSING
+         * Email not available:
+         * ASK EMAIL ONLY.
          */
 
         if (!client?.email) {
@@ -666,7 +547,7 @@ export class AiraOrchestratorService {
             {
               advisor: 'proposal',
               action: 'collect_email',
-              nextStep: 'collect_email',
+              nextStep: 'send_proposal',
             },
             project,
             client,
@@ -685,12 +566,14 @@ export class AiraOrchestratorService {
         }
 
         /*
+         * ------------------------------------------------------
          * EMAIL EXISTS
+         * ------------------------------------------------------
          *
-         * SEND ONLY.
+         * Generate proposal internally.
+         * Send email.
          *
-         * DO NOT RETURN THE GENERATED PROPOSAL
-         * TO THE CHAT.
+         * DO NOT return proposal in response.
          */
 
         if (
@@ -743,6 +626,10 @@ export class AiraOrchestratorService {
               });
           }
 
+          /*
+           * Build proposal internally.
+           */
+
           const proposal =
             this.proposalService.generate({
               client,
@@ -759,12 +646,20 @@ export class AiraOrchestratorService {
               },
             });
 
+          /*
+           * SEND EMAIL ONLY.
+           */
+
           await this.emailService.sendProposalEmail({
             to: client.email,
             clientName:
               client.name,
             proposal,
           });
+
+          /*
+           * Mark project complete.
+           */
 
           project =
             await this.memoryService.updateProject(
@@ -775,10 +670,9 @@ export class AiraOrchestratorService {
             );
 
           /*
-           * CHAT RESPONSE ONLY.
+           * IMPORTANT:
            *
-           * NO proposal object.
-           * NO proposal content.
+           * proposal is NOT returned.
            */
 
           return this.finalResponse(
@@ -803,8 +697,8 @@ export class AiraOrchestratorService {
               currentStage: 'COMPLETE',
               nextStage: 'COMPLETE',
               shouldAskQuestion: false,
-              nextMissingField: undefined,
               missingInformation: [],
+              nextMissingField: undefined,
             },
             undefined,
             [],
@@ -813,9 +707,9 @@ export class AiraOrchestratorService {
       }
 
       /*
-       * ------------------------------------------------------
+       * --------------------------------------------------------
        * MAKE CHANGES
-       * ------------------------------------------------------
+       * --------------------------------------------------------
        */
 
       if (
@@ -849,130 +743,256 @@ export class AiraOrchestratorService {
     }
 
     /*
-     * ========================================================
-     * EMAIL ENTERED AFTER EMAIL QUESTION
-     * ========================================================
+     * ==========================================================
+     * EMAIL ANSWER
+     * ==========================================================
+     *
+     * If email was entered after the email question,
+     * refresh memory and continue proposal sending logic.
      */
 
-    const extractedEmail =
-      this.extractEmail(message);
-
     if (
-      extractedEmail &&
-      client?.email === extractedEmail
+      expectedField === 'email'
     ) {
-      /*
-       * Email has now been saved.
-       *
-       * Send proposal immediately.
-       */
+      const email =
+        this.extractEmail(message);
 
-      if (
-        project?.id &&
-        this.hasEnoughForEstimate(project)
-      ) {
-        if (!pricing) {
-          pricing =
-            this.pricingService.calculate({
-              projectType:
-                project.projectType,
-
-              features:
-                this.toList(
-                  project.features,
-                ),
-
-              seo:
-                project.seo,
-
-              complexity:
-                project.complexity,
-            });
-        }
-
-        if (!timeline) {
-          timeline =
-            this.timelineService.calculate({
-              projectType:
-                project.projectType,
-
-              features:
-                this.toList(
-                  project.features,
-                ),
-
-              seo:
-                project.seo,
-
-              complexity:
-                project.complexity,
-            });
-        }
-
-        const proposal =
-          this.proposalService.generate({
-            client,
-            project: {
-              ...project,
-              timeline:
-                project.timeline ??
-                `${timeline.estimatedDays} days`,
-              budget:
-                project.budget ??
-                `${pricing.currency} ${pricing.estimatedPrice}`,
-            },
-          });
-
-        await this.emailService.sendProposalEmail({
-          to: extractedEmail,
-          clientName:
-            client.name,
-          proposal,
-        });
-
-        project =
-          await this.memoryService.updateProject(
-            project.id,
+      if (email) {
+        client =
+          await this.memoryService.updateClient(
+            input.clientId!,
             {
-              status: 'COMPLETE',
+              email,
             },
           );
 
-        return this.finalResponse(
-          input,
-          this.getProposalSentMessage(
-            language,
-          ),
-          {
-            intent: 'PROPOSAL',
-            confidence: 1,
-          },
-          {
-            advisor: 'proposal',
-            action: 'send_proposal',
-            nextStep: 'complete',
-          },
-          project,
-          client,
-          pricing,
-          timeline,
-          {
-            currentStage: 'COMPLETE',
-            nextStage: 'COMPLETE',
-            shouldAskQuestion: false,
-            nextMissingField: undefined,
-            missingInformation: [],
-          },
-          undefined,
-          [],
-        );
+        /*
+         * Re-fetch client.
+         */
+
+        const updatedClient =
+          await this.memoryService.getClient(
+            input.clientId!,
+          );
+
+        if (updatedClient) {
+          client = updatedClient;
+        }
+
+        /*
+         * If the previous assistant message was asking
+         * for email, send proposal immediately.
+         */
+
+        if (
+          this.wasAskingForEmail(
+            history,
+          )
+        ) {
+          if (!pricing) {
+            pricing =
+              this.pricingService.calculate({
+                projectType:
+                  project.projectType,
+
+                features:
+                  this.toList(
+                    project.features,
+                  ),
+
+                seo:
+                  project.seo,
+
+                complexity:
+                  project.complexity,
+              });
+          }
+
+          if (!timeline) {
+            timeline =
+              this.timelineService.calculate({
+                projectType:
+                  project.projectType,
+
+                features:
+                  this.toList(
+                    project.features,
+                  ),
+
+                seo:
+                  project.seo,
+
+                complexity:
+                  project.complexity,
+              });
+          }
+
+          const proposal =
+            this.proposalService.generate({
+              client,
+              project: {
+                ...project,
+                timeline:
+                  project.timeline ??
+                  `${timeline.estimatedDays} days`,
+                budget:
+                  project.budget ??
+                  `${pricing.currency} ${pricing.estimatedPrice}`,
+              },
+            });
+
+          await this.emailService.sendProposalEmail({
+            to: client.email,
+            clientName:
+              client.name,
+            proposal,
+          });
+
+          if (project?.id) {
+            project =
+              await this.memoryService.updateProject(
+                project.id,
+                {
+                  status: 'COMPLETE',
+                },
+              );
+          }
+
+          /*
+           * NEVER send proposal object to frontend.
+           */
+
+          return this.finalResponse(
+            input,
+            this.getProposalSentMessage(
+              language,
+            ),
+            {
+              intent: 'PROPOSAL',
+              confidence: 1,
+            },
+            {
+              advisor: 'proposal',
+              action: 'send_proposal',
+              nextStep: 'complete',
+            },
+            project,
+            client,
+            pricing,
+            timeline,
+            {
+              currentStage: 'COMPLETE',
+              nextStage: 'COMPLETE',
+              shouldAskQuestion: false,
+              missingInformation: [],
+              nextMissingField: undefined,
+            },
+            undefined,
+            [],
+          );
+        }
       }
     }
 
     /*
-     * ========================================================
+     * ==========================================================
+     * QUESTIONNAIRE
+     * ==========================================================
+     *
+     * One question at a time.
+     *
+     * Every selectable question gets options.
+     * Other is always included.
+     */
+
+    if (
+      workflow.shouldAskQuestion &&
+      workflow.nextMissingField
+    ) {
+      const field =
+        workflow.nextMissingField;
+
+      return this.finalResponse(
+        input,
+        this.questionText(
+          field,
+          language,
+        ),
+        intent,
+        this.decisionService.decide(
+          intent.intent,
+        ),
+        project,
+        client,
+        pricing,
+        timeline,
+        workflow,
+        undefined,
+        this.getQuestionOptions(
+          field,
+          language,
+        ),
+      );
+    }
+
+    /*
+     * ==========================================================
+     * ALL REQUIREMENTS COMPLETE
+     * ==========================================================
+     *
+     * IMPORTANT:
+     *
+     * No proposal content here.
+     * Only summary + proposal confirmation buttons.
+     */
+
+    if (
+      !workflow.nextMissingField
+    ) {
+      const summary =
+        this.buildProjectSummary(
+          project,
+          client,
+          pricing,
+          timeline,
+          language,
+        );
+
+      return this.finalResponse(
+        input,
+        summary,
+        {
+          intent: 'PROPOSAL',
+          confidence: 1,
+        },
+        {
+          advisor: 'proposal',
+          action: 'confirm_proposal',
+          nextStep: 'confirm_proposal',
+        },
+        project,
+        client,
+        pricing,
+        timeline,
+        {
+          ...workflow,
+          currentStage: 'PROPOSAL',
+          nextStage: 'PROPOSAL',
+          shouldAskQuestion: false,
+          missingInformation: [],
+          nextMissingField: undefined,
+        },
+        undefined,
+        this.getProposalConfirmationOptions(
+          language,
+        ),
+      );
+    }
+
+    /*
+     * ==========================================================
      * FALLBACK
-     * ========================================================
+     * ==========================================================
      */
 
     const response =
@@ -985,15 +1005,13 @@ export class AiraOrchestratorService {
         instruction: `
 Respond naturally and briefly.
 
-The application controls the consultation flow.
-
 Do not restart the consultation.
 Do not ask multiple questions.
 Do not ask for budget.
 Do not invent project details.
-Do not generate a proposal in chat.
+Do not generate or display a proposal.
 Do not summarize the entire project unless the application
-explicitly asks for the final summary.
+has explicitly reached the proposal confirmation stage.
 `,
       });
 
@@ -1014,7 +1032,7 @@ explicitly asks for the final summary.
 
   /*
    * ==========================================================
-   * ANSWER → FIELD
+   * ANSWER -> FIELD
    * ==========================================================
    */
 
@@ -1043,9 +1061,7 @@ explicitly asks for the final summary.
 
       case 'phone': {
         const phone =
-          this.extractPhoneNumber(
-            message,
-          );
+          this.extractPhoneNumber(message);
 
         return phone
           ? {
@@ -1087,29 +1103,19 @@ explicitly asks for the final summary.
         };
 
       case 'features': {
-        if (
-          /^done$/i.test(answer)
-        ) {
-          return {};
-        }
-
         /*
-         * "Other" by itself is a frontend state.
-         *
-         * If it reaches backend alone, do not save
-         * "Other" as a feature.
+         * Other alone should not become the literal feature.
          */
 
         if (
+          /^done$/i.test(answer) ||
           /^other$/i.test(answer)
         ) {
           return {};
         }
 
         const newFeatures =
-          this.extractFeatures(
-            message,
-          );
+          this.extractFeatures(message);
 
         if (newFeatures.length > 0) {
           return {
@@ -1125,7 +1131,7 @@ explicitly asks for the final summary.
         }
 
         /*
-         * Custom feature entered through Other.
+         * Custom feature from Other.
          */
 
         return {
@@ -1151,9 +1157,7 @@ explicitly asks for the final summary.
       case 'seo':
         return {
           seo:
-            this.normalizeSeo(
-              answer,
-            ),
+            this.normalizeSeo(answer),
         };
 
       case 'timeline':
@@ -1308,6 +1312,10 @@ explicitly asks for the final summary.
    * ==========================================================
    */
 
+  private getFirstQuestionOptions(): string[] {
+    return [];
+  }
+
   private getQuestionOptions(
     field: string,
     language:
@@ -1316,6 +1324,19 @@ explicitly asks for the final summary.
       | 'te'
       | 'other',
   ): string[] {
+    /*
+     * Text-input questions don't need buttons.
+     */
+
+    if (
+      field === 'clientName' ||
+      field === 'businessName' ||
+      field === 'phone' ||
+      field === 'email'
+    ) {
+      return [];
+    }
+
     const options: Record<
       string,
       string[]
@@ -1394,8 +1415,6 @@ explicitly asks for the final summary.
         'Flexible',
         'Other',
       ],
-
-      email: [],
     };
 
     return options[field] ?? [];
@@ -1547,6 +1566,12 @@ explicitly asks for the final summary.
       text.includes('reservation')
     ) {
       return 'Enable bookings / reservations';
+    }
+
+    if (
+      text.includes('multiple')
+    ) {
+      return 'Multiple goals';
     }
 
     return value;
@@ -1756,7 +1781,7 @@ explicitly asks for the final summary.
 
   /*
    * ==========================================================
-   * PROPOSAL STATE
+   * PROPOSAL HELPERS
    * ==========================================================
    */
 
@@ -1770,30 +1795,41 @@ explicitly asks for the final summary.
         (item) =>
           item.role === 'assistant',
       )
-      .slice(-8)
+      .slice(-5)
       .some((item) => {
         const text =
           item.content
             ?.toLowerCase() ?? '';
 
         return (
-          text.includes(
-            'proposal',
-          ) &&
+          text.includes('proposal') &&
           (
-            text.includes(
-              'would you like',
-            ) ||
-            text.includes(
-              'prepare',
-            ) ||
-            text.includes(
-              'send proposal',
-            ) ||
-            text.includes(
-              'proposal pampu',
-            )
+            text.includes('prepare') ||
+            text.includes('send')
           )
+        );
+      });
+  }
+
+  private wasAskingForEmail(
+    history: any[],
+  ): boolean {
+    return (
+      history ?? []
+    )
+      .filter(
+        (item) =>
+          item.role === 'assistant',
+      )
+      .slice(-3)
+      .some((item) => {
+        const text =
+          item.content
+            ?.toLowerCase() ?? '';
+
+        return (
+          text.includes('email address') ||
+          text.includes('email')
         );
       });
   }
@@ -1804,8 +1840,7 @@ explicitly asks for the final summary.
     const value =
       message
         .toLowerCase()
-        .trim()
-        .replace(/[.!?,]+$/g, '');
+        .trim();
 
     return [
       'yes',
@@ -1814,8 +1849,8 @@ explicitly asks for the final summary.
       'sure',
       'okay',
       'ok',
-      'send',
       'send it',
+      'send',
       'send proposal',
       'send the proposal',
       'go ahead',
@@ -1826,11 +1861,8 @@ explicitly asks for the final summary.
       'sare',
       'pampu',
       'pampandi',
-      'proposal pampu',
       'avunu proposal pampu',
       'avunu, proposal pampu',
-      'avunu proposal pampandi',
-      'avunu, proposal pampandi',
     ].includes(value);
   }
 
@@ -1890,12 +1922,13 @@ explicitly asks for the final summary.
 
   /*
    * ==========================================================
-   * CLEAN FINAL SUMMARY
+   * SUMMARY
    * ==========================================================
    */
 
-  private buildCompleteMessage(
+  private buildProjectSummary(
     project: any,
+    client: any,
     pricing: any,
     timeline: any,
     language:
@@ -1912,8 +1945,7 @@ explicitly asks for the final summary.
     const price =
       pricing
         ? `${pricing.currency} ${pricing.estimatedPrice}`
-        : project?.budget ??
-          'To be confirmed';
+        : 'To be confirmed';
 
     const days =
       project?.timeline ??
@@ -1928,7 +1960,7 @@ explicitly asks for the final summary.
       language === 'te-en'
     ) {
       return `
-Perfect! Mee website requirements complete ayyayi. ❤️
+Mee project requirements complete ayyayi. ❤️
 
 Business: ${project?.name ?? '-'}
 Business Type: ${project?.industry ?? '-'}
@@ -1941,12 +1973,12 @@ SEO: ${project?.seo ?? '-'}
 Timeline: ${days}
 Estimated Investment: ${price}
 
-Proposal pampinchala?
+Proposal prepare cheyyala?
 `.trim();
     }
 
     return `
-Perfect! Your website requirements are complete. ❤️
+Your project requirements are complete. ❤️
 
 Business: ${project?.name ?? '-'}
 Business Type: ${project?.industry ?? '-'}
@@ -1959,15 +1991,9 @@ SEO: ${project?.seo ?? '-'}
 Timeline: ${days}
 Estimated Investment: ${price}
 
-Would you like me to send your proposal?
+Would you like me to prepare your proposal?
 `.trim();
   }
-
-  /*
-   * ==========================================================
-   * PROPOSAL BUTTONS
-   * ==========================================================
-   */
 
   private getProposalConfirmationOptions(
     language:
@@ -2024,8 +2050,8 @@ Rules:
 - Never ask multiple questions.
 - Never ask for budget.
 - Never invent project information.
-- Never generate a proposal inside chat.
-- Never output a long project proposal.
+- Never mention internal workflow, database, memory or extraction.
+- Never generate or display a proposal inside chat.
 - Keep responses concise.
 
 Language:
@@ -2090,6 +2116,12 @@ Respond only to the latest user message.
    * ==========================================================
    * FINAL RESPONSE
    * ==========================================================
+   *
+   * IMPORTANT:
+   *
+   * proposal is intentionally NOT returned after sending.
+   *
+   * This prevents proposal content from appearing in chat.
    */
 
   private async finalResponse(
@@ -2125,6 +2157,10 @@ Respond only to the latest user message.
       );
     }
 
+    /*
+     * proposal is deliberately omitted from returned API data.
+     */
+
     return {
       message: finalMessage,
       options,
@@ -2133,18 +2169,6 @@ Respond only to the latest user message.
       workflow,
       pricing,
       timeline,
-
-      /*
-       * IMPORTANT:
-       *
-       * Proposal content is intentionally NOT returned
-       * to the frontend/chat.
-       *
-       * Proposal is generated and emailed internally.
-       */
-
-      proposal: undefined,
-
       llm: {
         provider: 'openrouter',
         model: 'aira-natural',
@@ -2154,7 +2178,7 @@ Respond only to the latest user message.
 
   /*
    * ==========================================================
-   * HELPERS
+   * ESTIMATE
    * ==========================================================
    */
 
@@ -2173,41 +2197,11 @@ Respond only to the latest user message.
     );
   }
 
-  private hasStartedProject(
-    project: any,
-    client: any,
-  ): boolean {
-    return Boolean(
-      client?.name ||
-      client?.phone ||
-      project?.name ||
-      project?.industry ||
-      project?.projectType ||
-      project?.goal ||
-      project?.audience ||
-      this.toList(
-        project?.features,
-      ).length > 0,
-    );
-  }
-
-  private greetingMessage(
-    language:
-      | 'en'
-      | 'te-en'
-      | 'te'
-      | 'other',
-  ): string {
-    if (language === 'te') {
-      return 'Hello! మీరు ఏం build చేయాలనుకుంటున్నారో కొంచెం చెప్పండి.';
-    }
-
-    if (language === 'te-en') {
-      return 'Hello! Mee website lo em build cheyyalanukuntunnaro konchem cheppandi.';
-    }
-
-    return 'Hello! Tell me a little about what you’d like to build.';
-  }
+  /*
+   * ==========================================================
+   * EXTRACTION
+   * ==========================================================
+   */
 
   private extractEmail(
     message: string,
@@ -2301,6 +2295,12 @@ Respond only to the latest user message.
       .filter(Boolean);
   }
 
+  /*
+   * ==========================================================
+   * LANGUAGE
+   * ==========================================================
+   */
+
   private detectResponseLanguage(
     message: string,
   ):
@@ -2345,6 +2345,8 @@ Respond only to the latest user message.
       'cheyyali',
       'cheyali',
       'bro',
+      'pampu',
+      'pampandi',
     ];
 
     if (
@@ -2360,6 +2362,30 @@ Respond only to the latest user message.
     }
 
     return 'en';
+  }
+
+  /*
+   * ==========================================================
+   * WELCOME
+   * ==========================================================
+   */
+
+  private getWelcomeMessage(
+    language:
+      | 'en'
+      | 'te-en'
+      | 'te'
+      | 'other',
+  ): string {
+    if (language === 'te') {
+      return 'హాయ్! మీరు ఏం build చేయాలనుకుంటున్నారో కొంచెం చెప్పండి.';
+    }
+
+    if (language === 'te-en') {
+      return 'Hi! Meeru em build cheyyalanukuntunnaro konchem cheppandi.';
+    }
+
+    return 'Hello! Tell me a little about what you’d like to build.';
   }
 
   private fallbackResponse(
@@ -2379,6 +2405,12 @@ Respond only to the latest user message.
 
     return 'Tell me what you need.';
   }
+
+  /*
+   * ==========================================================
+   * GREETING / THANKS
+   * ==========================================================
+   */
 
   private isGreeting(
     message: string,
