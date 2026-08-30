@@ -39,16 +39,20 @@ export class AiraOrchestratorService {
     let client = input.client;
     let project = input.project;
 
-    let history =
-      input.conversationHistory ?? [];
+    let history = input.conversationHistory ?? [];
 
-    const message =
-      input.message?.trim() ?? '';
+    const message = input.message?.trim() ?? '';
+
+    /*
+     * ========================================================
+     * EMPTY MESSAGE
+     * ========================================================
+     */
 
     if (!message) {
       return this.finalResponse(
         input,
-        'Tell me a little about what you would like to build.',
+        this.greetingMessage('en'),
         {
           intent: 'GENERAL_QUESTION',
           confidence: 1,
@@ -88,11 +92,8 @@ export class AiraOrchestratorService {
         );
       }
 
-      project =
-        conversation.project;
-
-      history =
-        conversation.messages ?? [];
+      project = conversation.project;
+      history = conversation.messages ?? [];
 
       client =
         await this.memoryService.getClient(
@@ -101,14 +102,16 @@ export class AiraOrchestratorService {
     }
 
     const language =
-      this.detectResponseLanguage(
-        message,
-      );
+      this.detectResponseLanguage(message);
 
     const intent =
-      this.intentService.detect(
-        message,
-      );
+      this.intentService.detect(message);
+
+    /*
+     * ========================================================
+     * SAVE USER MESSAGE
+     * ========================================================
+     */
 
     if (input.conversationId) {
       await this.memoryService.saveMessage(
@@ -124,33 +127,53 @@ export class AiraOrchestratorService {
 
     /*
      * ========================================================
-     * GREETING
+     * FIRST GREETING
      * ========================================================
-     *
-     * Greeting must never restart the flow.
+     */
+
+    if (
+      this.isGreeting(message) &&
+      !this.hasStartedProject(project, client)
+    ) {
+      return this.finalResponse(
+        input,
+        this.greetingMessage(language),
+        intent,
+        {
+          advisor: 'discovery',
+          action: 'start_discovery',
+          nextStep: 'collect_name',
+        },
+        project,
+        client,
+        undefined,
+        undefined,
+        {
+          currentStage: 'DISCOVERY',
+          nextStage: 'DISCOVERY',
+          shouldAskQuestion: true,
+          nextMissingField: 'clientName',
+          missingInformation: ['clientName'],
+        },
+        undefined,
+        [],
+      );
+    }
+
+    /*
+     * ========================================================
+     * GREETING DURING ACTIVE FLOW
+     * ========================================================
      */
 
     if (this.isGreeting(message)) {
-      const response =
-        await this.generateNaturalResponse({
-          message,
-          project,
-          client,
-          history,
-          language,
-          instruction: `
-The user greeted AIRA.
-
-Reply warmly and briefly.
-Do not restart the consultation.
-Do not ask a new question.
-If a project is already in progress, acknowledge it naturally.
-`,
-        });
-
       return this.finalResponse(
         input,
-        response,
+        language === 'te-en'
+          ? 'Hi! Manam mana website project continue cheddham. 😊'
+          : language === 'te'
+            ? 'హాయ్! మన website project ని continue చేద్దాం. 😊'
+            : 'Hi! Let’s continue with your website project. 😊',
         intent,
         this.decisionService.decide(
           intent.intent,
@@ -167,23 +190,13 @@ If a project is already in progress, acknowledge it naturally.
      */
 
     if (this.isThanks(message)) {
-      const response =
-        await this.generateNaturalResponse({
-          message,
-          project,
-          client,
-          history,
-          language,
-          instruction: `
-The user thanked AIRA.
-Reply naturally and briefly.
-Do not restart the consultation.
-`,
-        });
-
       return this.finalResponse(
         input,
-        response,
+        language === 'te-en'
+          ? 'You’re welcome! 😊'
+          : language === 'te'
+            ? 'మీకు స్వాగతం! 😊'
+            : 'You’re welcome! 😊',
         intent,
         this.decisionService.decide(
           intent.intent,
@@ -195,15 +208,13 @@ Do not restart the consultation.
 
     /*
      * ========================================================
-     * EXTRACT CLIENT DETAILS
+     * DIRECT CLIENT EXTRACTION
      * ========================================================
      */
 
     if (input.clientId) {
       const extractedName =
-        this.extractClientName(
-          message,
-        );
+        this.extractClientName(message);
 
       if (
         extractedName &&
@@ -218,30 +229,28 @@ Do not restart the consultation.
           );
       }
 
-      const email =
+      const extractedEmail =
         this.extractEmail(message);
 
-      if (email) {
+      if (extractedEmail) {
         client =
           await this.memoryService.updateClient(
             input.clientId,
             {
-              email,
+              email: extractedEmail,
             },
           );
       }
 
-      const phone =
-        this.extractPhoneNumber(
-          message,
-        );
+      const extractedPhone =
+        this.extractPhoneNumber(message);
 
-      if (phone) {
+      if (extractedPhone) {
         client =
           await this.memoryService.updateClient(
             input.clientId,
             {
-              phone,
+              phone: extractedPhone,
             },
           );
       }
@@ -249,7 +258,7 @@ Do not restart the consultation.
 
     /*
      * ========================================================
-     * GET CURRENT QUESTION
+     * CURRENT WORKFLOW BEFORE ANSWER
      * ========================================================
      */
 
@@ -264,20 +273,21 @@ Do not restart the consultation.
 
     /*
      * ========================================================
-     * SAVE ANSWER BASED ON EXPECTED FIELD
+     * SAVE ANSWER TO EXACT FIELD
      * ========================================================
-     *
-     * This is the important part.
-     *
-     * AIRA asks one question.
-     * User answers.
-     * Answer is saved to THAT field.
      */
 
     if (
       input.clientId &&
       expectedField
     ) {
+      /*
+       * OTHER CUSTOM INPUT
+       *
+       * If frontend sends the actual custom value,
+       * save it to the field currently being asked.
+       */
+
       const answerData =
         this.buildAnswerData(
           expectedField,
@@ -286,16 +296,13 @@ Do not restart the consultation.
         );
 
       if (
-        Object.keys(answerData).length >
-        0
+        Object.keys(answerData).length > 0
       ) {
         /*
-         * Client fields
+         * CLIENT NAME
          */
 
-        if (
-          answerData.__clientName
-        ) {
+        if (answerData.__clientName) {
           client =
             await this.memoryService.updateClient(
               input.clientId,
@@ -306,9 +313,11 @@ Do not restart the consultation.
             );
         }
 
-        if (
-          answerData.__phone
-        ) {
+        /*
+         * PHONE
+         */
+
+        if (answerData.__phone) {
           client =
             await this.memoryService.updateClient(
               input.clientId,
@@ -320,7 +329,7 @@ Do not restart the consultation.
         }
 
         /*
-         * Project fields
+         * PROJECT
          */
 
         const projectData = {
@@ -332,8 +341,7 @@ Do not restart the consultation.
 
         if (
           project?.id &&
-          Object.keys(projectData).length >
-            0
+          Object.keys(projectData).length > 0
         ) {
           project =
             await this.memoryService.updateProject(
@@ -361,8 +369,7 @@ Do not restart the consultation.
         );
 
       if (refreshed?.project) {
-        project =
-          refreshed.project;
+        project = refreshed.project;
       }
 
       const refreshedClient =
@@ -371,13 +378,11 @@ Do not restart the consultation.
         );
 
       if (refreshedClient) {
-        client =
-          refreshedClient;
+        client = refreshedClient;
       }
 
       history =
-        refreshed?.messages ??
-        history;
+        refreshed?.messages ?? history;
     }
 
     /*
@@ -394,7 +399,7 @@ Do not restart the consultation.
 
     /*
      * ========================================================
-     * AUTO PRICE / TIMELINE
+     * AUTOMATIC PRICE + TIMELINE CALCULATION
      * ========================================================
      */
 
@@ -402,9 +407,7 @@ Do not restart the consultation.
     let timeline: any;
 
     if (
-      this.hasEnoughForEstimate(
-        project,
-      )
+      this.hasEnoughForEstimate(project)
     ) {
       pricing =
         this.pricingService.calculate({
@@ -440,50 +443,30 @@ Do not restart the consultation.
             project.complexity,
         });
 
+      /*
+       * PRICE IS AUTOMATIC.
+       * NEVER ASK USER FOR BUDGET.
+       */
+
       if (
         input.conversationId &&
-        project?.id
+        project?.id &&
+        !project?.budget
       ) {
-        const updateData: any = {};
-
-        /*
-         * Pricing automatic.
-         * Never ask budget.
-         */
-
-        if (!project.budget) {
-          updateData.budget =
-            `${pricing.currency} ${pricing.estimatedPrice}`;
-        }
-
-        /*
-         * Timeline is automatic ONLY if the
-         * user has not selected/provided one.
-         */
-
-        if (!project.timeline) {
-          /*
-           * Do NOT save generated timeline here.
-           * Timeline must be asked first.
-           */
-        }
-
-        if (
-          Object.keys(updateData).length >
-          0
-        ) {
-          project =
-            await this.memoryService.updateProject(
-              project.id,
-              updateData,
-            );
-        }
+        project =
+          await this.memoryService.updateProject(
+            project.id,
+            {
+              budget:
+                `${pricing.currency} ${pricing.estimatedPrice}`,
+            },
+          );
       }
     }
 
     /*
      * ========================================================
-     * RE-CALCULATE WORKFLOW
+     * REFRESH WORKFLOW AGAIN
      * ========================================================
      */
 
@@ -495,185 +478,9 @@ Do not restart the consultation.
 
     /*
      * ========================================================
-     * PROPOSAL DECISION
-     * ========================================================
-     */
-
-    if (
-      this.isWaitingForProposalDecision(
-        history,
-      )
-    ) {
-      /*
-       * YES
-       */
-
-      if (
-        this.isProposalConfirmation(
-          message,
-        )
-      ) {
-        if (!client?.email) {
-          return this.finalResponse(
-            input,
-            this.questionText(
-              'email',
-              language,
-            ),
-            {
-              intent: 'PROPOSAL',
-              confidence: 1,
-            },
-            {
-              advisor: 'proposal',
-              action: 'prepare_proposal',
-              nextStep: 'collect_email',
-            },
-            project,
-            client,
-            pricing,
-            timeline,
-            {
-              ...workflow,
-              currentStage: 'PROPOSAL',
-              nextStage: 'PROPOSAL',
-              shouldAskQuestion: true,
-              nextMissingField: 'email',
-              missingInformation: ['email'],
-            },
-            undefined,
-            this.getQuestionOptions(
-              'email',
-              language,
-            ),
-          );
-        }
-
-        /*
-         * Email exists → generate + send proposal.
-         */
-
-        if (
-          project?.id &&
-          pricing &&
-          timeline &&
-          client?.email
-        ) {
-          const proposal =
-            this.proposalService.generate({
-              client,
-              project: {
-                ...project,
-                timeline:
-                  project.timeline ??
-                  `${timeline.estimatedDays} days`,
-                budget:
-                  project.budget ??
-                  `${pricing.currency} ${pricing.estimatedPrice}`,
-              },
-            });
-
-          await this.emailService.sendProposalEmail({
-            to: client.email,
-            clientName:
-              client.name,
-            proposal,
-          });
-
-          project =
-            await this.memoryService.updateProject(
-              project.id,
-              {
-                status: 'COMPLETE',
-              },
-            );
-
-          return this.finalResponse(
-            input,
-            this.getProposalSentMessage(
-              language,
-            ),
-            {
-              intent: 'PROPOSAL',
-              confidence: 1,
-            },
-            {
-              advisor: 'proposal',
-              action: 'send_proposal',
-              nextStep: 'complete',
-            },
-            project,
-            client,
-            pricing,
-            timeline,
-            {
-              currentStage: 'COMPLETE',
-              nextStage: 'COMPLETE',
-              shouldAskQuestion: false,
-              missingInformation: [],
-              nextMissingField: undefined,
-            },
-            proposal,
-            [],
-          );
-        }
-      }
-
-      /*
-       * ======================================================
-       * MAKE CHANGES
-       * ======================================================
-       */
-
-      if (
-        this.isProposalChanges(
-          message,
-        )
-      ) {
-        return this.finalResponse(
-          input,
-          this.getChangesMessage(
-            language,
-          ),
-          {
-            intent: 'PROPOSAL',
-            confidence: 1,
-          },
-          {
-            advisor: 'proposal',
-            action: 'modify_proposal',
-            nextStep: 'collect_changes',
-          },
-          project,
-          client,
-          pricing,
-          timeline,
-          workflow,
-          undefined,
-          [],
-        );
-      }
-    }
-
-    /*
-     * ========================================================
-     * EMAIL DIRECT ANSWER
-     * ========================================================
-     */
-
-    if (
-      this.extractEmail(message)
-    ) {
-      workflow =
-        this.workflowService.determine({
-          project,
-          client,
-        });
-    }
-
-    /*
-     * ========================================================
      * QUESTIONNAIRE
+     *
+     * ONE QUESTION ONLY
      * ========================================================
      */
 
@@ -683,6 +490,65 @@ Do not restart the consultation.
     ) {
       const field =
         workflow.nextMissingField;
+
+      /*
+       * EMAIL IS SPECIAL.
+       *
+       * Email must ONLY be asked after
+       * user explicitly clicks "Yes, send proposal".
+       */
+
+      if (field === 'email') {
+        /*
+         * Do not expose email question from normal
+         * questionnaire unless proposal confirmation
+         * already happened.
+         */
+
+        if (
+          !this.isWaitingForProposalDecision(
+            history,
+          )
+        ) {
+          return this.finalResponse(
+            input,
+            this.buildCompleteMessage(
+              project,
+              pricing,
+              timeline,
+              language,
+            ),
+            {
+              intent: 'PROPOSAL',
+              confidence: 1,
+            },
+            {
+              advisor: 'proposal',
+              action: 'prepare_proposal',
+              nextStep: 'confirm_proposal',
+            },
+            project,
+            client,
+            pricing,
+            timeline,
+            {
+              currentStage: 'PROPOSAL',
+              nextStage: 'PROPOSAL',
+              shouldAskQuestion: false,
+              nextMissingField: undefined,
+              missingInformation: [],
+            },
+            undefined,
+            this.getProposalConfirmationOptions(
+              language,
+            ),
+          );
+        }
+      }
+
+      /*
+       * Normal question.
+       */
 
       return this.finalResponse(
         input,
@@ -709,25 +575,26 @@ Do not restart the consultation.
 
     /*
      * ========================================================
-     * ALL REQUIREMENTS COMPLETE
+     * REQUIREMENTS COMPLETE
      * ========================================================
+     *
+     * IMPORTANT:
+     * DO NOT GENERATE PROPOSAL HERE.
+     *
+     * Only show clean summary and confirmation buttons.
      */
 
     if (
       !workflow.nextMissingField
     ) {
-      const summary =
-        this.buildProjectSummary(
+      return this.finalResponse(
+        input,
+        this.buildCompleteMessage(
           project,
-          client,
           pricing,
           timeline,
           language,
-        );
-
-      return this.finalResponse(
-        input,
-        summary,
+        ),
         {
           intent: 'PROPOSAL',
           confidence: 1,
@@ -746,14 +613,360 @@ Do not restart the consultation.
           currentStage: 'PROPOSAL',
           nextStage: 'PROPOSAL',
           shouldAskQuestion: false,
-          missingInformation: [],
           nextMissingField: undefined,
+          missingInformation: [],
         },
         undefined,
         this.getProposalConfirmationOptions(
           language,
         ),
       );
+    }
+
+    /*
+     * ========================================================
+     * PROPOSAL CONFIRMATION
+     * ========================================================
+     *
+     * This block must execute BEFORE generic
+     * questionnaire handling.
+     */
+
+    if (
+      this.isWaitingForProposalDecision(
+        history,
+      )
+    ) {
+      /*
+       * ------------------------------------------------------
+       * YES → SEND PROPOSAL
+       * ------------------------------------------------------
+       */
+
+      if (
+        this.isProposalConfirmation(
+          message,
+        )
+      ) {
+        /*
+         * EMAIL MISSING
+         */
+
+        if (!client?.email) {
+          return this.finalResponse(
+            input,
+            this.questionText(
+              'email',
+              language,
+            ),
+            {
+              intent: 'PROPOSAL',
+              confidence: 1,
+            },
+            {
+              advisor: 'proposal',
+              action: 'collect_email',
+              nextStep: 'collect_email',
+            },
+            project,
+            client,
+            pricing,
+            timeline,
+            {
+              currentStage: 'PROPOSAL',
+              nextStage: 'PROPOSAL',
+              shouldAskQuestion: true,
+              nextMissingField: 'email',
+              missingInformation: ['email'],
+            },
+            undefined,
+            [],
+          );
+        }
+
+        /*
+         * EMAIL EXISTS
+         *
+         * SEND ONLY.
+         *
+         * DO NOT RETURN THE GENERATED PROPOSAL
+         * TO THE CHAT.
+         */
+
+        if (
+          project?.id &&
+          client?.email
+        ) {
+          /*
+           * Ensure pricing exists.
+           */
+
+          if (!pricing) {
+            pricing =
+              this.pricingService.calculate({
+                projectType:
+                  project.projectType,
+
+                features:
+                  this.toList(
+                    project.features,
+                  ),
+
+                seo:
+                  project.seo,
+
+                complexity:
+                  project.complexity,
+              });
+          }
+
+          /*
+           * Ensure timeline exists.
+           */
+
+          if (!timeline) {
+            timeline =
+              this.timelineService.calculate({
+                projectType:
+                  project.projectType,
+
+                features:
+                  this.toList(
+                    project.features,
+                  ),
+
+                seo:
+                  project.seo,
+
+                complexity:
+                  project.complexity,
+              });
+          }
+
+          const proposal =
+            this.proposalService.generate({
+              client,
+              project: {
+                ...project,
+
+                timeline:
+                  project.timeline ??
+                  `${timeline.estimatedDays} days`,
+
+                budget:
+                  project.budget ??
+                  `${pricing.currency} ${pricing.estimatedPrice}`,
+              },
+            });
+
+          await this.emailService.sendProposalEmail({
+            to: client.email,
+            clientName:
+              client.name,
+            proposal,
+          });
+
+          project =
+            await this.memoryService.updateProject(
+              project.id,
+              {
+                status: 'COMPLETE',
+              },
+            );
+
+          /*
+           * CHAT RESPONSE ONLY.
+           *
+           * NO proposal object.
+           * NO proposal content.
+           */
+
+          return this.finalResponse(
+            input,
+            this.getProposalSentMessage(
+              language,
+            ),
+            {
+              intent: 'PROPOSAL',
+              confidence: 1,
+            },
+            {
+              advisor: 'proposal',
+              action: 'send_proposal',
+              nextStep: 'complete',
+            },
+            project,
+            client,
+            pricing,
+            timeline,
+            {
+              currentStage: 'COMPLETE',
+              nextStage: 'COMPLETE',
+              shouldAskQuestion: false,
+              nextMissingField: undefined,
+              missingInformation: [],
+            },
+            undefined,
+            [],
+          );
+        }
+      }
+
+      /*
+       * ------------------------------------------------------
+       * MAKE CHANGES
+       * ------------------------------------------------------
+       */
+
+      if (
+        this.isProposalChanges(
+          message,
+        )
+      ) {
+        return this.finalResponse(
+          input,
+          this.getChangesMessage(
+            language,
+          ),
+          {
+            intent: 'PROPOSAL',
+            confidence: 1,
+          },
+          {
+            advisor: 'proposal',
+            action: 'modify_project',
+            nextStep: 'collect_changes',
+          },
+          project,
+          client,
+          pricing,
+          timeline,
+          workflow,
+          undefined,
+          [],
+        );
+      }
+    }
+
+    /*
+     * ========================================================
+     * EMAIL ENTERED AFTER EMAIL QUESTION
+     * ========================================================
+     */
+
+    const extractedEmail =
+      this.extractEmail(message);
+
+    if (
+      extractedEmail &&
+      client?.email === extractedEmail
+    ) {
+      /*
+       * Email has now been saved.
+       *
+       * Send proposal immediately.
+       */
+
+      if (
+        project?.id &&
+        this.hasEnoughForEstimate(project)
+      ) {
+        if (!pricing) {
+          pricing =
+            this.pricingService.calculate({
+              projectType:
+                project.projectType,
+
+              features:
+                this.toList(
+                  project.features,
+                ),
+
+              seo:
+                project.seo,
+
+              complexity:
+                project.complexity,
+            });
+        }
+
+        if (!timeline) {
+          timeline =
+            this.timelineService.calculate({
+              projectType:
+                project.projectType,
+
+              features:
+                this.toList(
+                  project.features,
+                ),
+
+              seo:
+                project.seo,
+
+              complexity:
+                project.complexity,
+            });
+        }
+
+        const proposal =
+          this.proposalService.generate({
+            client,
+            project: {
+              ...project,
+              timeline:
+                project.timeline ??
+                `${timeline.estimatedDays} days`,
+              budget:
+                project.budget ??
+                `${pricing.currency} ${pricing.estimatedPrice}`,
+            },
+          });
+
+        await this.emailService.sendProposalEmail({
+          to: extractedEmail,
+          clientName:
+            client.name,
+          proposal,
+        });
+
+        project =
+          await this.memoryService.updateProject(
+            project.id,
+            {
+              status: 'COMPLETE',
+            },
+          );
+
+        return this.finalResponse(
+          input,
+          this.getProposalSentMessage(
+            language,
+          ),
+          {
+            intent: 'PROPOSAL',
+            confidence: 1,
+          },
+          {
+            advisor: 'proposal',
+            action: 'send_proposal',
+            nextStep: 'complete',
+          },
+          project,
+          client,
+          pricing,
+          timeline,
+          {
+            currentStage: 'COMPLETE',
+            nextStage: 'COMPLETE',
+            shouldAskQuestion: false,
+            nextMissingField: undefined,
+            missingInformation: [],
+          },
+          undefined,
+          [],
+        );
+      }
     }
 
     /*
@@ -772,10 +985,15 @@ Do not restart the consultation.
         instruction: `
 Respond naturally and briefly.
 
+The application controls the consultation flow.
+
 Do not restart the consultation.
 Do not ask multiple questions.
 Do not ask for budget.
 Do not invent project details.
+Do not generate a proposal in chat.
+Do not summarize the entire project unless the application
+explicitly asks for the final summary.
 `,
       });
 
@@ -869,13 +1087,20 @@ Do not invent project details.
         };
 
       case 'features': {
+        if (
+          /^done$/i.test(answer)
+        ) {
+          return {};
+        }
+
         /*
-         * "Done" means existing features are enough.
-         * "Other" alone is NOT saved.
+         * "Other" by itself is a frontend state.
+         *
+         * If it reaches backend alone, do not save
+         * "Other" as a feature.
          */
 
         if (
-          /^done$/i.test(answer) ||
           /^other$/i.test(answer)
         ) {
           return {};
@@ -885,10 +1110,6 @@ Do not invent project details.
           this.extractFeatures(
             message,
           );
-
-        /*
-         * If known feature exists.
-         */
 
         if (newFeatures.length > 0) {
           return {
@@ -904,7 +1125,7 @@ Do not invent project details.
         }
 
         /*
-         * Custom Other feature.
+         * Custom feature entered through Other.
          */
 
         return {
@@ -1535,7 +1756,7 @@ Do not invent project details.
 
   /*
    * ==========================================================
-   * PROPOSAL
+   * PROPOSAL STATE
    * ==========================================================
    */
 
@@ -1549,7 +1770,7 @@ Do not invent project details.
         (item) =>
           item.role === 'assistant',
       )
-      .slice(-5)
+      .slice(-8)
       .some((item) => {
         const text =
           item.content
@@ -1561,10 +1782,16 @@ Do not invent project details.
           ) &&
           (
             text.includes(
+              'would you like',
+            ) ||
+            text.includes(
               'prepare',
             ) ||
             text.includes(
-              'send',
+              'send proposal',
+            ) ||
+            text.includes(
+              'proposal pampu',
             )
           )
         );
@@ -1574,6 +1801,12 @@ Do not invent project details.
   private isProposalConfirmation(
     message: string,
   ): boolean {
+    const value =
+      message
+        .toLowerCase()
+        .trim()
+        .replace(/[.!?,]+$/g, '');
+
     return [
       'yes',
       'yeah',
@@ -1581,25 +1814,24 @@ Do not invent project details.
       'sure',
       'okay',
       'ok',
-      'send it',
       'send',
+      'send it',
       'send proposal',
       'send the proposal',
       'go ahead',
       'yes please',
+      'yes send proposal',
+      'yes, send proposal',
       'avunu',
       'sare',
       'pampu',
       'pampandi',
+      'proposal pampu',
       'avunu proposal pampu',
       'avunu, proposal pampu',
-      'yes send proposal',
-      'yes, send proposal',
-    ].includes(
-      message
-        .toLowerCase()
-        .trim(),
-    );
+      'avunu proposal pampandi',
+      'avunu, proposal pampandi',
+    ].includes(value);
   }
 
   private isProposalChanges(
@@ -1658,13 +1890,12 @@ Do not invent project details.
 
   /*
    * ==========================================================
-   * SUMMARY
+   * CLEAN FINAL SUMMARY
    * ==========================================================
    */
 
-  private buildProjectSummary(
+  private buildCompleteMessage(
     project: any,
-    client: any,
     pricing: any,
     timeline: any,
     language:
@@ -1681,20 +1912,23 @@ Do not invent project details.
     const price =
       pricing
         ? `${pricing.currency} ${pricing.estimatedPrice}`
-        : 'To be confirmed';
+        : project?.budget ??
+          'To be confirmed';
 
     const days =
       project?.timeline ??
-      (timeline
-        ? `${timeline.estimatedDays} days`
-        : 'To be confirmed');
+      (
+        timeline
+          ? `${timeline.estimatedDays} days`
+          : 'To be confirmed'
+      );
 
     if (
       language === 'te' ||
       language === 'te-en'
     ) {
       return `
-Mee project requirements complete ayyayi. ❤️
+Perfect! Mee website requirements complete ayyayi. ❤️
 
 Business: ${project?.name ?? '-'}
 Business Type: ${project?.industry ?? '-'}
@@ -1707,12 +1941,12 @@ SEO: ${project?.seo ?? '-'}
 Timeline: ${days}
 Estimated Investment: ${price}
 
-Proposal prepare cheyyala?
+Proposal pampinchala?
 `.trim();
     }
 
     return `
-Your project requirements are complete. ❤️
+Perfect! Your website requirements are complete. ❤️
 
 Business: ${project?.name ?? '-'}
 Business Type: ${project?.industry ?? '-'}
@@ -1725,9 +1959,15 @@ SEO: ${project?.seo ?? '-'}
 Timeline: ${days}
 Estimated Investment: ${price}
 
-Would you like me to prepare your proposal?
+Would you like me to send your proposal?
 `.trim();
   }
+
+  /*
+   * ==========================================================
+   * PROPOSAL BUTTONS
+   * ==========================================================
+   */
 
   private getProposalConfirmationOptions(
     language:
@@ -1784,7 +2024,8 @@ Rules:
 - Never ask multiple questions.
 - Never ask for budget.
 - Never invent project information.
-- Never mention internal workflow, database, memory or extraction.
+- Never generate a proposal inside chat.
+- Never output a long project proposal.
 - Keep responses concise.
 
 Language:
@@ -1892,7 +2133,18 @@ Respond only to the latest user message.
       workflow,
       pricing,
       timeline,
-      proposal,
+
+      /*
+       * IMPORTANT:
+       *
+       * Proposal content is intentionally NOT returned
+       * to the frontend/chat.
+       *
+       * Proposal is generated and emailed internally.
+       */
+
+      proposal: undefined,
+
       llm: {
         provider: 'openrouter',
         model: 'aira-natural',
@@ -1919,6 +2171,42 @@ Respond only to the latest user message.
       project?.technology &&
       project?.seo,
     );
+  }
+
+  private hasStartedProject(
+    project: any,
+    client: any,
+  ): boolean {
+    return Boolean(
+      client?.name ||
+      client?.phone ||
+      project?.name ||
+      project?.industry ||
+      project?.projectType ||
+      project?.goal ||
+      project?.audience ||
+      this.toList(
+        project?.features,
+      ).length > 0,
+    );
+  }
+
+  private greetingMessage(
+    language:
+      | 'en'
+      | 'te-en'
+      | 'te'
+      | 'other',
+  ): string {
+    if (language === 'te') {
+      return 'Hello! మీరు ఏం build చేయాలనుకుంటున్నారో కొంచెం చెప్పండి.';
+    }
+
+    if (language === 'te-en') {
+      return 'Hello! Mee website lo em build cheyyalanukuntunnaro konchem cheppandi.';
+    }
+
+    return 'Hello! Tell me a little about what you’d like to build.';
   }
 
   private extractEmail(
