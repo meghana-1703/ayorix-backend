@@ -6,7 +6,6 @@ import {
 
 import { IntentService } from '../intent/intent.service';
 import { DecisionService } from '../decision/decision.service';
-import { PromptService } from '../prompt/prompt.service';
 import { LlmService } from '../llm/llm.service';
 import { ProposalService } from '../proposal/proposal.service';
 import { PricingService } from '../pricing/pricing.service';
@@ -20,7 +19,6 @@ export class AiraOrchestratorService {
   constructor(
     private readonly intentService: IntentService,
     private readonly decisionService: DecisionService,
-    private readonly promptService: PromptService,
     private readonly llmService: LlmService,
     private readonly proposalService: ProposalService,
     private readonly pricingService: PricingService,
@@ -47,16 +45,24 @@ export class AiraOrchestratorService {
     const message =
       input.message?.trim() ?? '';
 
+    /*
+     * ========================================================
+     * 1. BASIC VALIDATION
+     * ========================================================
+     */
+
     if (!message) {
       return this.finalResponse(
         input,
-        'Tell me what you have in mind.',
+        'Please tell me a little about your project.',
         {
-          intent: 'GENERAL',
+          intent: 'GENERAL_QUESTION',
           confidence: 1,
         },
         {
-          type: 'GENERAL',
+          advisor: 'discovery',
+          action: 'start_discovery',
+          nextStep: 'collect_details',
         },
         project,
         client,
@@ -64,10 +70,10 @@ export class AiraOrchestratorService {
     }
 
     /*
-    ============================================================
-    1. LOAD MEMORY
-    ============================================================
-    */
+     * ========================================================
+     * 2. LOAD MEMORY
+     * ========================================================
+     */
 
     if (input.conversationId) {
       if (!input.clientId) {
@@ -94,35 +100,48 @@ export class AiraOrchestratorService {
       history =
         conversation.messages ?? [];
 
-      client =
+      const storedClient =
         await this.memoryService.getClient(
           conversation.clientId,
         );
+
+      if (storedClient) {
+        client = storedClient;
+      }
     }
 
     /*
-    ============================================================
-    2. LANGUAGE
-    ============================================================
-    */
+     * ========================================================
+     * 3. LANGUAGE
+     * ========================================================
+     */
 
     const language =
-      this.detectResponseLanguage(message);
+      this.detectResponseLanguage(
+        message,
+      );
 
     /*
-    ============================================================
-    3. INTENT
-    ============================================================
-    */
+     * ========================================================
+     * 4. INTENT
+     * ========================================================
+     */
 
-    const intent =
-      this.intentService.detect(message);
+    const detectedIntent =
+      this.intentService.detect(
+        message,
+      );
+
+    const decision =
+      this.decisionService.decide(
+        detectedIntent.intent,
+      );
 
     /*
-    ============================================================
-    4. SAVE USER MESSAGE
-    ============================================================
-    */
+     * ========================================================
+     * 5. SAVE USER MESSAGE
+     * ========================================================
+     */
 
     if (input.conversationId) {
       await this.memoryService.saveMessage(
@@ -130,34 +149,43 @@ export class AiraOrchestratorService {
         {
           role: 'user',
           content: message,
-          intent: intent.intent,
-          confidence: intent.confidence,
+          intent:
+            detectedIntent.intent,
+          confidence:
+            detectedIntent.confidence,
         },
       );
     }
 
     /*
-    ============================================================
-    5. EXTRACT CLIENT DATA
-    ============================================================
-    */
+     * ========================================================
+     * 6. EXTRACT CLIENT INFORMATION
+     * ========================================================
+     */
 
     if (input.clientId) {
-      const name =
-        this.extractClientName(message);
+      const extractedName =
+        this.extractClientName(
+          message,
+        );
 
-      if (name) {
+      if (
+        extractedName &&
+        !client?.name
+      ) {
         client =
           await this.memoryService.updateClient(
             input.clientId,
             {
-              name,
+              name: extractedName,
             },
           );
       }
 
       const email =
-        this.extractEmail(message);
+        this.extractEmail(
+          message,
+        );
 
       if (email) {
         client =
@@ -170,7 +198,9 @@ export class AiraOrchestratorService {
       }
 
       const phone =
-        this.extractPhoneNumber(message);
+        this.extractPhoneNumber(
+          message,
+        );
 
       if (phone) {
         client =
@@ -184,21 +214,116 @@ export class AiraOrchestratorService {
     }
 
     /*
-    ============================================================
-    6. UNDERSTAND + EXTRACT PROJECT DATA
-    ============================================================
-    */
+     * ========================================================
+     * 7. DETERMINE WHAT AIRA IS WAITING FOR
+     * ========================================================
+     *
+     * This happens BEFORE extraction.
+     *
+     * Example:
+     *
+     * AIRA: What is your business name?
+     * User: ABC Restaurant
+     *
+     * The answer is stored as project.name.
+     */
+
+    let workflow =
+      this.workflowService.determine({
+        project,
+        client,
+      });
+
+    const expectedField =
+      workflow.nextMissingField;
+
+    /*
+     * ========================================================
+     * 8. CONTEXT-AWARE ANSWER HANDLING
+     * ========================================================
+     */
+
+    if (
+      input.clientId &&
+      expectedField === 'clientName' &&
+      !client?.name
+    ) {
+      const cleanName =
+        this.cleanSimpleAnswer(
+          message,
+        );
+
+      if (
+        cleanName &&
+        !this.looksLikeEmail(
+          cleanName,
+        ) &&
+        !this.looksLikePhone(
+          cleanName,
+        )
+      ) {
+        client =
+          await this.memoryService.updateClient(
+            input.clientId,
+            {
+              name: cleanName,
+            },
+          );
+      }
+    }
+
+    /*
+     * BUSINESS NAME
+     */
+
+    if (
+      input.conversationId &&
+      project?.id &&
+      expectedField === 'businessName'
+    ) {
+      const businessName =
+        this.cleanSimpleAnswer(
+          message,
+        );
+
+      if (
+        businessName &&
+        !this.looksLikeEmail(
+          businessName,
+        ) &&
+        !this.looksLikePhone(
+          businessName,
+        )
+      ) {
+        project =
+          await this.memoryService.updateProject(
+            project.id,
+            {
+              name: businessName,
+            },
+          );
+      }
+    }
+
+    /*
+     * ========================================================
+     * 9. PROJECT DATA EXTRACTION
+     * ========================================================
+     */
 
     const understanding =
       this.buildUnderstanding(
         message,
         project,
+        expectedField,
       );
 
     if (
       input.conversationId &&
       project?.id &&
-      Object.keys(understanding).length > 0
+      Object.keys(
+        understanding,
+      ).length > 0
     ) {
       project =
         await this.memoryService.updateProject(
@@ -208,43 +333,58 @@ export class AiraOrchestratorService {
     }
 
     /*
-    ============================================================
-    7. REFRESH PROJECT MEMORY
-    ============================================================
-    */
+     * ========================================================
+     * 10. REFRESH MEMORY
+     * ========================================================
+     */
 
     if (
       input.conversationId &&
-      project?.id
+      input.clientId
     ) {
       const refreshed =
         await this.memoryService.getConversationForClient(
           input.conversationId,
-          input.clientId!,
+          input.clientId,
         );
 
       if (refreshed?.project) {
         project =
           refreshed.project;
       }
+
+      const refreshedClient =
+        await this.memoryService.getClient(
+          input.clientId,
+        );
+
+      if (refreshedClient) {
+        client =
+          refreshedClient;
+      }
     }
 
     /*
-    ============================================================
-    8. DECISION
-    ============================================================
-    */
+     * ========================================================
+     * 11. RECALCULATE WORKFLOW
+     * ========================================================
+     */
 
-    const decision =
-      this.decisionService.decide(
-        intent.intent,
-      );
+    workflow =
+      this.workflowService.determine({
+        project,
+        client,
+      });
 
     /*
-    ============================================================
-    9. CALCULATE PRICE / TIMELINE
-    ============================================================
-    */
+     * ========================================================
+     * 12. PRICE + TIMELINE
+     * ========================================================
+     *
+     * These are automatic.
+     *
+     * User is NEVER asked for budget.
+     */
 
     let pricing: any =
       undefined;
@@ -291,6 +431,10 @@ export class AiraOrchestratorService {
             project.complexity,
         });
 
+      /*
+       * Store automatic price.
+       */
+
       if (
         input.conversationId &&
         project?.id
@@ -308,7 +452,9 @@ export class AiraOrchestratorService {
         }
 
         if (
-          Object.keys(updateData).length > 0
+          Object.keys(
+            updateData,
+          ).length > 0
         ) {
           project =
             await this.memoryService.updateProject(
@@ -317,31 +463,24 @@ export class AiraOrchestratorService {
             );
         }
       }
+
+      workflow =
+        this.workflowService.determine({
+          project,
+          client,
+        });
     }
 
     /*
-    ============================================================
-    10. WORKFLOW STATE ONLY
-    ============================================================
-
-    Workflow is used for STATE.
-    It does NOT control the conversation.
-    */
-
-    let workflow =
-      this.workflowService.determine({
-        project,
-        client,
-      });
-
-    /*
-    ============================================================
-    11. GREETING
-    ============================================================
-    */
+     * ========================================================
+     * 13. GREETING
+     * ========================================================
+     */
 
     if (
-      this.isGreeting(message)
+      this.isGreeting(
+        message,
+      )
     ) {
       const response =
         await this.generateNaturalResponse({
@@ -349,26 +488,23 @@ export class AiraOrchestratorService {
           project,
           client,
           history,
-          intent,
-          decision,
           language,
           instruction: `
 The user greeted AIRA.
 
-Reply warmly and naturally.
-Do not start a questionnaire.
-Do not ask a generic list of questions.
-If there is an existing project, acknowledge that naturally.
-If there is no project, invite the user to tell you what they have in mind.
+Reply warmly and briefly.
 
-Keep it short and conversational.
+If the consultation is already in progress,
+do NOT restart it.
+
+Do NOT ask multiple questions.
 `,
         });
 
       return this.finalResponse(
         input,
         response,
-        intent,
+        detectedIntent,
         decision,
         project,
         client,
@@ -379,13 +515,15 @@ Keep it short and conversational.
     }
 
     /*
-    ============================================================
-    12. THANKS
-    ============================================================
-    */
+     * ========================================================
+     * 14. THANKS
+     * ========================================================
+     */
 
     if (
-      this.isThanks(message)
+      this.isThanks(
+        message,
+      )
     ) {
       const response =
         await this.generateNaturalResponse({
@@ -393,303 +531,354 @@ Keep it short and conversational.
           project,
           client,
           history,
-          intent,
-          decision,
           language,
           instruction: `
 The user thanked AIRA.
 
-Reply naturally and briefly.
+Reply briefly and naturally.
+
 Do not restart discovery.
-Do not ask another project question.
-`,
-        });
-
-      return this.finalResponse(
-        input,
-        response,
-        intent,
-        decision,
-        project,
-        client,
-        pricing,
-        timeline,
-        workflow,
-      );
-    }
-
-    /*
-    ============================================================
-    13. PROPOSAL DECLINE
-    ============================================================
-    */
-
-    if (
-      this.isProposalDecline(
-        message,
-        history,
-      )
-    ) {
-      const response =
-        await this.generateNaturalResponse({
-          message,
-          project,
-          client,
-          history,
-          intent,
-          decision,
-          language,
-          instruction: `
-The user declined the proposal.
-
-Respond politely.
-Do not ask another discovery question.
-Do not restart the project conversation.
-Keep it short.
-`,
-        });
-
-      return this.finalResponse(
-        input,
-        response,
-        intent,
-        decision,
-        project,
-        client,
-        pricing,
-        timeline,
-        workflow,
-      );
-    }
-
-    /*
-    ============================================================
-    14. PROPOSAL CONFIRMATION
-    ============================================================
-    */
-
-    if (
-      this.isProposalConfirmation(
-        message,
-        history,
-      )
-    ) {
-      /*
-      EMAIL NOT AVAILABLE
-      */
-
-      if (!client?.email) {
-        const response =
-          await this.generateNaturalResponse({
-            message,
-            project,
-            client,
-            history,
-            intent,
-            decision,
-            language,
-            instruction: `
-The user confirmed that they want the proposal.
-
-Ask only for the email address where the proposal
-should be sent.
-
-Do not ask anything else.
-`,
-          });
-
-        return this.finalResponse(
-          input,
-          response,
-          intent,
-          decision,
-          project,
-          client,
-          pricing,
-          timeline,
-          workflow,
-        );
-      }
-
-      /*
-      SEND PROPOSAL
-      */
-
-      if (
-        project?.id &&
-        pricing &&
-        timeline &&
-        client.email
-      ) {
-        const proposal =
-          this.proposalService.generate({
-            client,
-            project: {
-              ...project,
-
-              timeline:
-                project.timeline ??
-                `${timeline.estimatedDays} days`,
-
-              budget:
-                project.budget ??
-                `${pricing.currency} ${pricing.estimatedPrice}`,
-            },
-          });
-
-        await this.emailService.sendProposalEmail({
-          to: client.email,
-          clientName:
-            client.name,
-          proposal,
-        });
-
-        project =
-          await this.memoryService.updateProject(
-            project.id,
-            {
-              status: 'COMPLETE',
-            },
-          );
-
-        const response =
-          await this.generateNaturalResponse({
-            message,
-            project,
-            client,
-            history,
-            intent,
-            decision,
-            language,
-            instruction: `
-The proposal has successfully been sent to
-${client.email}.
-
-Confirm that naturally.
 Do not ask another question.
 `,
+        });
+
+      return this.finalResponse(
+        input,
+        response,
+        detectedIntent,
+        decision,
+        project,
+        client,
+        pricing,
+        timeline,
+        workflow,
+      );
+    }
+
+    /*
+     * ========================================================
+     * 15. PROPOSAL DECISION
+     * ========================================================
+     */
+
+    if (
+      this.isWaitingForProposalDecision(
+        history,
+      )
+    ) {
+      /*
+       * CONFIRM
+       */
+
+      if (
+        this.isProposalConfirmation(
+          message,
+        )
+      ) {
+        /*
+         * Email missing
+         */
+
+        if (!client?.email) {
+          const emailQuestion =
+            this.questionText(
+              'email',
+              language,
+            );
+
+          return this.finalResponse(
+            input,
+            emailQuestion,
+            detectedIntent,
+            decision,
+            project,
+            client,
+            pricing,
+            timeline,
+            {
+              ...workflow,
+              currentStage:
+                'PROPOSAL',
+              nextStage:
+                'PROPOSAL',
+              shouldAskQuestion:
+                true,
+              nextMissingField:
+                'email',
+              missingInformation:
+                ['email'],
+            },
+            undefined,
+            this.getQuestionOptions(
+              'email',
+              language,
+            ),
+          );
+        }
+
+        /*
+         * Send proposal
+         */
+
+        if (
+          project?.id &&
+          pricing &&
+          timeline &&
+          client.email
+        ) {
+          const proposal =
+            this.proposalService.generate({
+              client,
+              project: {
+                ...project,
+
+                timeline:
+                  project.timeline ??
+                  `${timeline.estimatedDays} days`,
+
+                budget:
+                  project.budget ??
+                  `${pricing.currency} ${pricing.estimatedPrice}`,
+              },
+            });
+
+          await this.emailService.sendProposalEmail({
+            to: client.email,
+            clientName:
+              client.name,
+            proposal,
+          });
+
+          project =
+            await this.memoryService.updateProject(
+              project.id,
+              {
+                status: 'COMPLETE',
+              },
+            );
+
+          return this.finalResponse(
+            input,
+            this.getProposalSentMessage(
+              language,
+            ),
+            {
+              intent: 'PROPOSAL',
+              confidence: 1,
+            },
+            {
+              advisor: 'proposal',
+              action: 'send_proposal',
+              nextStep:
+                'complete_project',
+            },
+            project,
+            client,
+            pricing,
+            timeline,
+            {
+              currentStage:
+                'COMPLETE',
+              nextStage:
+                'COMPLETE',
+              missingInformation: [],
+              shouldAskQuestion:
+                false,
+              nextMissingField:
+                undefined,
+            },
+            proposal,
+            [],
+          );
+        }
+      }
+
+      /*
+       * DECLINE / CHANGES
+       */
+
+      if (
+        this.isProposalDecline(
+          message,
+        )
+      ) {
+        const response =
+          await this.generateNaturalResponse({
+            message,
+            project,
+            client,
+            history,
+            language,
+            instruction: `
+The user does not want to send the proposal yet.
+
+Reply politely.
+
+If they said they want changes,
+acknowledge that.
+
+Do not restart discovery.
+Do not ask multiple questions.
+`,
           });
 
         return this.finalResponse(
           input,
           response,
-          intent,
+          detectedIntent,
           decision,
           project,
           client,
           pricing,
           timeline,
           workflow,
-          proposal,
         );
       }
     }
 
     /*
-    ============================================================
-    15. EMAIL AFTER PROPOSAL CONFIRMATION
-    ============================================================
-    */
+     * ========================================================
+     * 16. EMAIL DIRECT ANSWER
+     * ========================================================
+     */
 
     const suppliedEmail =
-      this.extractEmail(message);
+      this.extractEmail(
+        message,
+      );
 
     if (
       suppliedEmail &&
-      this.isWaitingForEmail(history)
+      expectedField === 'email'
     ) {
       if (input.clientId) {
         client =
           await this.memoryService.updateClient(
             input.clientId,
             {
-              email: suppliedEmail,
+              email:
+                suppliedEmail,
             },
           );
       }
 
-      if (
-        project?.id &&
-        pricing &&
-        timeline &&
-        client?.email
-      ) {
-        const proposal =
-          this.proposalService.generate({
-            client,
-            project: {
-              ...project,
-
-              timeline:
-                project.timeline ??
-                `${timeline.estimatedDays} days`,
-
-              budget:
-                project.budget ??
-                `${pricing.currency} ${pricing.estimatedPrice}`,
-            },
-          });
-
-        await this.emailService.sendProposalEmail({
-          to: client.email,
-          clientName:
-            client.name,
-          proposal,
+      workflow =
+        this.workflowService.determine({
+          project,
+          client,
         });
+    }
 
-        project =
-          await this.memoryService.updateProject(
-            project.id,
-            {
-              status: 'COMPLETE',
-            },
-          );
+    /*
+     * ========================================================
+     * 17. QUESTIONNAIRE CONTROLLER
+     * ========================================================
+     *
+     * THIS IS THE MAIN AIRA FLOW.
+     *
+     * One question only.
+     * Options are returned.
+     * "Other" is always available for fields
+     * where predefined options exist.
+     */
 
-        const response =
-          await this.generateNaturalResponse({
-            message,
-            project,
-            client,
-            history,
-            intent,
-            decision,
-            language,
-            instruction: `
-The proposal was successfully sent to
-${client.email}.
+    if (
+      workflow.shouldAskQuestion &&
+      workflow.nextMissingField
+    ) {
+      const field =
+        workflow.nextMissingField;
 
-Confirm this naturally and briefly.
-Do not ask another question.
-`,
-          });
+      const question =
+        this.questionText(
+          field,
+          language,
+        );
 
-        return this.finalResponse(
-          input,
-          response,
-          intent,
-          decision,
+      const options =
+        this.getQuestionOptions(
+          field,
+          language,
+        );
+
+      return this.finalResponse(
+        input,
+        question,
+        detectedIntent,
+        decision,
+        project,
+        client,
+        pricing,
+        timeline,
+        workflow,
+        undefined,
+        options,
+      );
+    }
+
+    /*
+     * ========================================================
+     * 18. REQUIREMENTS COMPLETE
+     * ========================================================
+     */
+
+    if (
+      !workflow.shouldAskQuestion &&
+      workflow.nextMissingField ===
+        undefined &&
+      this.hasAllProjectRequirements(
+        project,
+      )
+    ) {
+      const summary =
+        this.buildProjectSummary(
           project,
           client,
           pricing,
           timeline,
-          workflow,
-          proposal,
+          language,
         );
-      }
+
+      return this.finalResponse(
+        input,
+        summary,
+        {
+          intent: 'PROPOSAL',
+          confidence: 1,
+        },
+        {
+          advisor: 'proposal',
+          action: 'prepare_proposal',
+          nextStep:
+            'confirm_proposal',
+        },
+        project,
+        client,
+        pricing,
+        timeline,
+        {
+          ...workflow,
+          currentStage:
+            'PROPOSAL',
+          nextStage:
+            'PROPOSAL',
+          shouldAskQuestion:
+            false,
+          nextMissingField:
+            undefined,
+        },
+        undefined,
+        this.getProposalConfirmationOptions(
+          language,
+        ),
+      );
     }
 
     /*
-    ============================================================
-    16. NORMAL CONVERSATION
-    ============================================================
-
-    THIS IS THE IMPORTANT PART.
-
-    No questionnaire.
-    No fixed next question.
-    No options.
-    No forced discovery field.
-    */
+     * ========================================================
+     * 19. NATURAL FALLBACK
+     * ========================================================
+     */
 
     const response =
       await this.generateNaturalResponse({
@@ -697,49 +886,25 @@ Do not ask another question.
         project,
         client,
         history,
-        intent,
-        decision,
         language,
-        pricing,
-        timeline,
         instruction: `
-You are AIRA, the friendly project consultant for AYORIX.
+Respond naturally and briefly to the user's latest message.
 
-Have a real conversation with the user.
+Do not restart discovery.
 
-IMPORTANT:
+Do not ask multiple questions.
 
-- Do NOT behave like a questionnaire.
-- Do NOT ask a fixed sequence of questions.
-- Do NOT mention project fields.
-- Do NOT mention workflow.
-- Do NOT mention extraction.
-- Do NOT mention backend logic.
-- Do NOT ask several questions at once.
-- Do NOT ask for budget.
-- Do NOT repeat information the user already gave.
-- Understand the user's latest message first.
-- Answer their actual question if they asked one.
-- If they shared project information, acknowledge it naturally.
-- If they ask for an opinion, recommendation or explanation, provide it.
-- If something genuinely important is missing, ask naturally for it only when necessary.
-- Let the conversation develop naturally.
-- The user may provide multiple requirements in one message.
-- Remember everything already stored in the project.
-- Never behave as if this is a form.
-- Never use robotic phrases such as "Next question", "Please select one", or "Let's move to the next field".
-- Keep the response concise.
-- Use simple natural English when the user speaks English.
-- Mirror Roman Telugu / Telugu-English when the user uses it.
-- Never randomly switch language.
-- Be friendly, professional and human.
+Do not ask for budget.
+
+If the application needs a required
+question, the application will ask it separately.
 `,
       });
 
     return this.finalResponse(
       input,
       response,
-      intent,
+      detectedIntent,
       decision,
       project,
       client,
@@ -750,14 +915,15 @@ IMPORTANT:
   }
 
   /*
-  ============================================================
-  UNDERSTANDING / EXTRACTION
-  ============================================================
-  */
+   * ==========================================================
+   * BUILD UNDERSTANDING
+   * ==========================================================
+   */
 
   private buildUnderstanding(
     message: string,
     project?: any,
+    expectedField?: string,
   ): Record<string, any> {
     const lower =
       message
@@ -767,8 +933,10 @@ IMPORTANT:
     const data: Record<string, any> = {};
 
     /*
-    PROJECT TYPE
-    */
+     * ========================================================
+     * PROJECT TYPE
+     * ========================================================
+     */
 
     if (
       lower.includes('ecommerce') ||
@@ -800,14 +968,16 @@ IMPORTANT:
     }
 
     /*
-    INDUSTRY
-    */
+     * ========================================================
+     * INDUSTRY
+     * ========================================================
+     */
 
     if (
       lower.includes('restaurant') ||
+      lower.includes('resturant') ||
       lower.includes('food') ||
-      lower.includes('cafe') ||
-      lower.includes('hotel')
+      lower.includes('cafe')
     ) {
       data.industry =
         'Restaurant / Food';
@@ -845,11 +1015,50 @@ IMPORTANT:
     ) {
       data.industry =
         'Beauty / Salon';
+    } else if (
+      expectedField === 'industry'
+    ) {
+      const custom =
+        this.cleanOptionAnswer(
+          message,
+        );
+
+      if (
+        custom &&
+        !this.isGenericOptionText(
+          custom,
+        )
+      ) {
+        data.industry =
+          custom;
+      }
     }
 
     /*
-    GOAL
-    */
+     * ========================================================
+     * GOAL
+     * ========================================================
+     */
+
+    if (
+      lower.includes('online order') ||
+      lower.includes('online ordering')
+    ) {
+      data.goal =
+        'Generate online orders';
+    }
+
+    if (
+      lower.includes('table reservation') ||
+      lower.includes('table reservations') ||
+      lower.includes('reserve table') ||
+      lower.includes('book a table')
+    ) {
+      data.goal =
+        data.goal
+          ? `${data.goal} and enable table reservations`
+          : 'Enable table reservations';
+    }
 
     if (
       lower.includes('more customers') ||
@@ -877,15 +1086,35 @@ IMPORTANT:
     ) {
       data.goal =
         'Build brand presence';
+    } else if (
+      expectedField === 'goal'
+    ) {
+      const custom =
+        this.cleanOptionAnswer(
+          message,
+        );
+
+      if (
+        custom &&
+        !this.isGenericOptionText(
+          custom,
+        )
+      ) {
+        data.goal =
+          custom;
+      }
     }
 
     /*
-    AUDIENCE
-    */
+     * ========================================================
+     * AUDIENCE
+     * ========================================================
+     */
 
     if (
       lower.includes('local customer') ||
-      lower.includes('local customers')
+      lower.includes('local customers') ||
+      lower.includes('nearby customers')
     ) {
       data.audience =
         'Local customers';
@@ -913,14 +1142,35 @@ IMPORTANT:
     ) {
       data.audience =
         'Professionals';
+    } else if (
+      expectedField === 'audience'
+    ) {
+      const custom =
+        this.cleanOptionAnswer(
+          message,
+        );
+
+      if (
+        custom &&
+        !this.isGenericOptionText(
+          custom,
+        )
+      ) {
+        data.audience =
+          custom;
+      }
     }
 
     /*
-    FEATURES
-    */
+     * ========================================================
+     * FEATURES
+     * ========================================================
+     */
 
     const features =
-      this.extractFeatures(message);
+      this.extractFeatures(
+        message,
+      );
 
     if (features.length > 0) {
       const existing =
@@ -937,46 +1187,128 @@ IMPORTANT:
     }
 
     /*
-    TECHNOLOGY
-    */
+     * "Other" typed feature
+     */
+
+    if (
+      expectedField === 'features' &&
+      features.length === 0 &&
+      !this.isGenericOptionText(
+        message,
+      )
+    ) {
+      const custom =
+        this.cleanOptionAnswer(
+          message,
+        );
+
+      if (custom) {
+        const existing =
+          this.toList(
+            project?.features,
+          );
+
+        data.features = [
+          ...new Set([
+            ...existing,
+            custom,
+          ]),
+        ];
+      }
+    }
+
+    /*
+     * ========================================================
+     * TECHNOLOGY
+     * ========================================================
+     */
 
     const technology =
-      this.extractTechnology(message);
+      this.extractTechnology(
+        message,
+      );
 
     if (technology) {
       data.technology =
         technology;
+    } else if (
+      expectedField === 'technology'
+    ) {
+      const custom =
+        this.cleanOptionAnswer(
+          message,
+        );
+
+      if (
+        custom &&
+        !this.isGenericOptionText(
+          custom,
+        )
+      ) {
+        data.technology =
+          custom;
+      }
     }
 
     /*
-    SEO
-    */
+     * ========================================================
+     * SEO
+     * ========================================================
+     */
 
     const seo =
-      this.extractSeo(message);
+      this.extractSeo(
+        message,
+      );
 
     if (seo) {
-      data.seo = seo;
+      data.seo =
+        seo;
     }
 
     /*
-    TIMELINE
-    */
+     * ========================================================
+     * TIMELINE
+     * ========================================================
+     */
 
     const timeline =
-      this.extractTimeline(message);
+      this.extractTimeline(
+        message,
+      );
 
     if (timeline) {
       data.timeline =
         timeline;
+    } else if (
+      expectedField === 'timeline'
+    ) {
+      const custom =
+        this.cleanOptionAnswer(
+          message,
+        );
+
+      if (
+        custom &&
+        !this.isGenericOptionText(
+          custom,
+        )
+      ) {
+        data.timeline =
+          custom;
+      }
     }
 
     /*
-    COMPLEXITY
-    */
+     * ========================================================
+     * COMPLEXITY
+     * ========================================================
+     */
 
     const complexity =
-      this.extractComplexity(message);
+      this.extractComplexity(
+        message,
+      );
 
     if (complexity) {
       data.complexity =
@@ -987,218 +1319,363 @@ IMPORTANT:
   }
 
   /*
-  ============================================================
-  ESTIMATE CHECK
-  ============================================================
-  */
+   * ==========================================================
+   * QUESTION TEXT
+   * ==========================================================
+   */
 
-  private hasEnoughForEstimate(
-    project: any,
-  ): boolean {
-    return Boolean(
-      project?.projectType &&
-      project?.industry &&
-      project?.goal &&
-      project?.features &&
-      this.toList(
-        project.features,
-      ).length > 0 &&
-      project?.technology &&
-      project?.seo,
-    );
-  }
-
-  /*
-  ============================================================
-  NATURAL LLM RESPONSE
-  ============================================================
-  */
-
- private async generateNaturalResponse(
-  params: {
-    message: string;
-    project: any;
-    client: any;
-    history: any[];
-    intent: any;
-    decision: any;
+  private questionText(
+    field: string,
     language:
       | 'en'
       | 'te-en'
       | 'te'
-      | 'other';
-    pricing?: any;
-    timeline?: any;
-    instruction: string;
-  },
-): Promise<string> {
+      | 'other',
+  ): string {
+    const questions: Record<
+      string,
+      {
+        en: string;
+        'te-en': string;
+        te: string;
+      }
+    > = {
+      clientName: {
+        en: 'Great! Before we continue, what’s your name?',
+        'te-en':
+          'Great! Continue cheyyadaniki mundu, mee name enti?',
+        te:
+          'సరే! కొనసాగించే ముందు మీ పేరు ఏమిటి?',
+      },
 
-  const systemPrompt = `
-You are AIRA, the friendly AI project consultant for AYORIX Digital Solutions.
+      businessName: {
+        en: 'What is your business name?',
+        'te-en':
+          'Mee business name enti?',
+        te:
+          'మీ business పేరు ఏమిటి?',
+      },
 
-YOUR ROLE:
-You are a helpful human-like conversational assistant.
-You help users understand website development, design, technology, SEO, features, pricing, timelines, and AYORIX services.
+      projectType: {
+        en: 'What kind of website would you like?',
+        'te-en':
+          'Meeku ye type of website kavali?',
+        te:
+          'మీకు ఎలాంటి website కావాలి?',
+      },
 
-MOST IMPORTANT RULE:
-You are NOT a questionnaire.
-You are NOT a form.
-You are NOT a scripted discovery bot.
+      industry: {
+        en: 'What type of business is this?',
+        'te-en':
+          'Mee business ye type ki belong avuthundi?',
+        te:
+          'మీ business ఏ రకానికి చెందుతుంది?',
+      },
 
-Have a natural conversation.
+      goal: {
+        en: 'What is the main goal of your website?',
+        'te-en':
+          'Mee website main goal enti?',
+        te:
+          'మీ website ప్రధాన లక్ష్యం ఏమిటి?',
+      },
 
-CONVERSATION RULES:
-- Always understand the user's latest message first.
-- Answer the user's actual question before anything else.
-- If the user asks a normal/general question, answer it normally.
-- If the user asks about AYORIX, explain AYORIX clearly.
-- If the user asks what you can do, explain what AIRA/AYORIX can do.
-- If the user gives project requirements, acknowledge and use them.
-- Never repeat information the user has already provided.
-- Never restart the discovery process.
-- Never behave as if every message requires another project question.
-- Never force the user through predefined fields.
-- Never mention workflow stages.
-- Never mention project fields.
-- Never mention extraction, backend logic, database, intent detection, or internal systems.
-- Never ask multiple questions in one response.
-- Never ask for budget.
-- Only ask a question when it is genuinely useful for continuing the conversation.
-- If enough information is available, do not ask another unnecessary question.
-- If the user changes the topic, follow the new topic naturally.
-- If the user says hello/hey, respond naturally. Do not restart discovery.
-- If the user says thanks, respond naturally. Do not ask another question.
-- If the user asks for an explanation, explain it simply.
-- If the user asks for an opinion, give a useful opinion.
-- If the user asks for a recommendation, recommend something practical.
-- If the user asks something unrelated to the project, answer it normally when possible.
+      audience: {
+        en: 'Who do you mainly want to reach with the website?',
+        'te-en':
+          'Mee website mainly evarini reach avvali?',
+        te:
+          'మీ website ప్రధానంగా ఎవరిని చేరుకోవాలి?',
+      },
 
-PROJECT CONTEXT:
-The project information below is memory/context only.
-Use it to understand the user.
-Do NOT turn the conversation into a checklist just because some information is missing.
+      features: {
+        en: 'Which features would you like on your website?',
+        'te-en':
+          'Mee website lo ye features kavali?',
+        te:
+          'మీ website లో ఏ features కావాలి?',
+      },
 
-LANGUAGE:
-- English input -> respond in simple natural English.
-- Roman Telugu or Telugu-English input -> respond naturally in Roman Telugu + English.
-- Telugu script input -> respond in Telugu script.
-- Never randomly switch languages.
+      technology: {
+        en: 'Do you have a preferred technology, or would you like me to recommend one?',
+        'te-en':
+          'Meeku technology preference undha, leka nenu recommend cheyyala?',
+        te:
+          'మీకు technology preference ఉందా, లేక నేను recommend చేయాలా?',
+      },
 
-STYLE:
-- Friendly
-- Professional
-- Simple
-- Concise
-- Natural
-- Human
+      seo: {
+        en: 'Would you like SEO to help your website appear in Google search?',
+        'te-en':
+          'Mee website Google lo rank avvadaniki SEO kavala?',
+        te:
+          'మీ website Googleలో కనిపించడానికి SEO కావాలా?',
+      },
 
-NEVER USE:
-"Next question"
-"Let's move to the next field"
-"Please select one"
-"Choose an option"
-"Fill in the following"
-"What is your budget?"
-"Tell me the remaining requirements"
+      timeline: {
+        en: 'When would you like the website to be ready?',
+        'te-en':
+          'Website eppatiki ready avvali?',
+        te:
+          'Website ఎప్పటికి ready అవ్వాలి?',
+      },
 
-Do not sound like a questionnaire.
+      email: {
+        en: 'What email address should I use for your project and proposal?',
+        'te-en':
+          'Mee project and proposal kosam ye email address use cheyyali?',
+        te:
+          'మీ project మరియు proposal కోసం ఏ email address ఉపయోగించాలి?',
+      },
+    };
 
-IMPORTANT:
-The user may provide several requirements in one message.
-Understand all of them.
-Do not ask for information that is already present.
-Do not repeat the same question simply because another project field is empty.
+    const item =
+      questions[field];
 
-${params.instruction}
-`;
-
-  const userPrompt = `
-USER MESSAGE:
-${params.message}
-
-CURRENT PROJECT MEMORY:
-${JSON.stringify(
-  params.project ?? {},
-  null,
-  2,
-)}
-
-CURRENT CLIENT MEMORY:
-${JSON.stringify(
-  params.client ?? {},
-  null,
-  2,
-)}
-
-CURRENT INTENT:
-${JSON.stringify(
-  params.intent ?? {},
-  null,
-  2,
-)}
-
-DECISION CONTEXT:
-${JSON.stringify(
-  params.decision ?? {},
-  null,
-  2,
-)}
-
-PRICING CONTEXT:
-${JSON.stringify(
-  params.pricing ?? null,
-  null,
-  2,
-)}
-
-TIMELINE CONTEXT:
-${JSON.stringify(
-  params.timeline ?? null,
-  null,
-  2,
-)}
-
-RECENT CONVERSATION:
-${JSON.stringify(
-  params.history.slice(-12),
-  null,
-  2,
-)}
-
-Now respond ONLY to the user's latest message.
-
-Do not restart discovery.
-Do not create a questionnaire.
-Do not ask unnecessary questions.
-Answer naturally and directly.
-`;
-
-  try {
-    const llm =
-      await this.llmService.generate({
-        systemPrompt,
-        userPrompt,
-      });
-
-    const content =
-      llm.content?.trim();
-
-    if (content) {
-      return content;
+    if (!item) {
+      return 'Tell me a little more about what you need.';
     }
-  } catch {
-    // fallback below
+
+    if (language === 'te') {
+      return item.te;
+    }
+
+    if (language === 'te-en') {
+      return item['te-en'];
+    }
+
+    return item.en;
   }
 
-  return this.fallbackResponse(
-    params.language,
-  );
-}
   /*
-  ============================================================
-  FINAL RESPONSE
-  ============================================================
-  */
+   * ==========================================================
+   * OPTIONS
+   * ==========================================================
+   *
+   * Every selectable questionnaire field gets an "Other"
+   * option.
+   *
+   * Frontend should show a text input when Other is selected.
+   */
+
+  private getQuestionOptions(
+    field: string,
+    language:
+      | 'en'
+      | 'te-en'
+      | 'te'
+      | 'other',
+  ): string[] {
+    const options: Record<
+      string,
+      string[]
+    > = {
+      industry: [
+        'Restaurant',
+        'Salon / Beauty',
+        'Clinic / Healthcare',
+        'Education',
+        'Real Estate',
+        'E-commerce',
+        'Technology',
+        'Other',
+      ],
+
+      projectType: [
+        'Business Website',
+        'E-commerce Website',
+        'Web Application',
+        'Portfolio Website',
+        'Other',
+      ],
+
+      goal: [
+        'Showcase services',
+        'Get more customers',
+        'Generate leads',
+        'Online orders',
+        'Bookings / Reservations',
+        'Multiple goals',
+        'Other',
+      ],
+
+      audience: [
+        'Local customers',
+        'General public',
+        'Small businesses',
+        'Startups',
+        'Students',
+        'Professionals',
+        'Other',
+      ],
+
+      features: [
+        'Online Ordering',
+        'Table Booking',
+        'Payment Gateway',
+        'WhatsApp',
+        'Contact Form',
+        'Google Maps',
+        'Admin Panel',
+        'Other',
+        'Done',
+      ],
+
+      technology: [
+        'React',
+        'Next.js',
+        'Not sure — recommend',
+        'Other',
+      ],
+
+      seo: [
+        'Basic SEO',
+        'Local SEO',
+        'Advanced SEO',
+        'No SEO',
+        'Other',
+      ],
+
+      timeline: [
+        '1 week',
+        '2 weeks',
+        '3–4 weeks',
+        'Flexible',
+        'Other',
+      ],
+    };
+
+    return options[field] ?? [];
+  }
+
+  /*
+   * ==========================================================
+   * PROPOSAL OPTIONS
+   * ==========================================================
+   */
+
+  private getProposalConfirmationOptions(
+    language:
+      | 'en'
+      | 'te-en'
+      | 'te'
+      | 'other',
+  ): string[] {
+    if (language === 'te') {
+      return [
+        'అవును, proposal పంపండి',
+        'మార్పులు చేయాలి',
+      ];
+    }
+
+    if (language === 'te-en') {
+      return [
+        'Avunu, proposal pampu',
+        'Changes kavali',
+      ];
+    }
+
+    return [
+      'Yes, send proposal',
+      'Make changes',
+    ];
+  }
+
+  /*
+   * ==========================================================
+   * SUMMARY
+   * ==========================================================
+   */
+
+  private buildProjectSummary(
+    project: any,
+    client: any,
+    pricing: any,
+    timeline: any,
+    language:
+      | 'en'
+      | 'te-en'
+      | 'te'
+      | 'other',
+  ): string {
+    const features =
+      this.toList(
+        project?.features,
+      );
+
+    const price =
+      pricing
+        ? `${pricing.currency} ${pricing.estimatedPrice}`
+        : project?.budget ??
+          'To be confirmed';
+
+    const days =
+      timeline
+        ? `${timeline.estimatedDays} days`
+        : project?.timeline ??
+          'To be confirmed';
+
+    if (language === 'te') {
+      return `
+Mee project requirements complete ayyayi. ❤️
+
+Business: ${project?.name ?? '-'}
+Business Type: ${project?.industry ?? '-'}
+Website: ${project?.projectType ?? '-'}
+Goal: ${project?.goal ?? '-'}
+Audience: ${project?.audience ?? '-'}
+Features: ${features.join(', ') || '-'}
+Technology: ${project?.technology ?? '-'}
+SEO: ${project?.seo ?? '-'}
+Timeline: ${days}
+Estimated Investment: ${price}
+
+Proposal prepare cheyyala?
+`.trim();
+    }
+
+    if (language === 'te-en') {
+      return `
+Mee project requirements complete ayyayi. ❤️
+
+Business: ${project?.name ?? '-'}
+Business Type: ${project?.industry ?? '-'}
+Website: ${project?.projectType ?? '-'}
+Goal: ${project?.goal ?? '-'}
+Audience: ${project?.audience ?? '-'}
+Features: ${features.join(', ') || '-'}
+Technology: ${project?.technology ?? '-'}
+SEO: ${project?.seo ?? '-'}
+Timeline: ${days}
+Estimated Investment: ${price}
+
+Proposal prepare cheyyala?
+`.trim();
+    }
+
+    return `
+Your project requirements are complete. ❤️
+
+Business: ${project?.name ?? '-'}
+Business Type: ${project?.industry ?? '-'}
+Website: ${project?.projectType ?? '-'}
+Goal: ${project?.goal ?? '-'}
+Audience: ${project?.audience ?? '-'}
+Features: ${features.join(', ') || '-'}
+Technology: ${project?.technology ?? '-'}
+SEO: ${project?.seo ?? '-'}
+Timeline: ${days}
+Estimated Investment: ${price}
+
+Would you like me to prepare your proposal?
+`.trim();
+  }
+
+  /*
+   * ==========================================================
+   * FINAL RESPONSE
+   * ==========================================================
+   */
 
   private async finalResponse(
     input: {
@@ -1213,10 +1690,11 @@ Answer naturally and directly.
     timeline?: any,
     workflow?: any,
     proposal?: any,
+    options: string[] = [],
   ) {
     const finalMessage =
       message?.trim() ||
-      'Tell me what you have in mind.';
+      'Please tell me a little about your project.';
 
     if (input.conversationId) {
       await this.memoryService.saveMessage(
@@ -1235,12 +1713,7 @@ Answer naturally and directly.
     return {
       message: finalMessage,
 
-      /*
-      IMPORTANT:
-      No questionnaire options.
-      */
-
-      options: [],
+      options,
 
       intent,
       decision,
@@ -1250,6 +1723,11 @@ Answer naturally and directly.
           currentStage:
             project?.status ??
             'DISCOVERY',
+
+          nextStage:
+            'DISCOVERY',
+
+          missingInformation: [],
 
           shouldAskQuestion:
             false,
@@ -1267,48 +1745,139 @@ Answer naturally and directly.
   }
 
   /*
-  ============================================================
-  HELPERS
-  ============================================================
-  */
+   * ==========================================================
+   * NATURAL RESPONSE
+   * ==========================================================
+   */
 
-  private isGreeting(
-    message: string,
-  ): boolean {
-    return /^(hi|hii|hello|hey|helo|good morning|good afternoon|good evening|good night)$/i.test(
-      message.trim(),
+  private async generateNaturalResponse(
+    params: {
+      message: string;
+      project: any;
+      client: any;
+      history: any[];
+      language:
+        | 'en'
+        | 'te-en'
+        | 'te'
+        | 'other';
+      instruction: string;
+    },
+  ): Promise<string> {
+    const systemPrompt = `
+You are AIRA, the friendly AI project consultant for AYORIX Digital Solutions.
+
+You are helpful, natural and professional.
+
+IMPORTANT:
+The application controls the questionnaire flow.
+
+Never invent required information.
+
+Never skip required questions.
+
+Never ask multiple questions.
+
+Never ask for budget.
+
+Never restart discovery.
+
+Never mention internal systems, workflow,
+database, extraction or implementation details.
+
+Language:
+- English -> English
+- Roman Telugu / Telugu-English -> Roman Telugu + English
+- Telugu script -> Telugu script
+
+Keep responses concise.
+
+${params.instruction}
+`;
+
+    const userPrompt = `
+USER MESSAGE:
+${params.message}
+
+PROJECT MEMORY:
+${JSON.stringify(
+  params.project ?? {},
+  null,
+  2,
+)}
+
+CLIENT MEMORY:
+${JSON.stringify(
+  params.client ?? {},
+  null,
+  2,
+)}
+
+RECENT HISTORY:
+${JSON.stringify(
+  params.history.slice(-10),
+  null,
+  2,
+)}
+
+Respond only to the user's latest message.
+`;
+
+    try {
+      const llm =
+        await this.llmService.generate({
+          systemPrompt,
+          userPrompt,
+        });
+
+      const content =
+        llm.content?.trim();
+
+      if (content) {
+        return content;
+      }
+    } catch {
+      // fallback
+    }
+
+    return this.fallbackResponse(
+      params.language,
     );
   }
 
-  private isThanks(
-    message: string,
-  ): boolean {
-    return [
-      'thanks',
-      'thank you',
-      'thankyou',
-      'thx',
-      'thanks a lot',
-      'thank you so much',
-    ].includes(
-      message
-        .toLowerCase()
-        .trim(),
-    );
+  /*
+   * ==========================================================
+   * PROPOSAL SENT
+   * ==========================================================
+   */
+
+  private getProposalSentMessage(
+    language:
+      | 'en'
+      | 'te-en'
+      | 'te'
+      | 'other',
+  ): string {
+    if (language === 'te') {
+      return 'Mee proposal successfully email ki pampinchanu. Thank you! ❤️';
+    }
+
+    if (language === 'te-en') {
+      return 'Mee proposal successfully email ki pampinchanu. Thank you! ❤️';
+    }
+
+    return 'Your proposal has been successfully sent to your email. Thank you! ❤️';
   }
+
+  /*
+   * ==========================================================
+   * PROPOSAL CONFIRMATION
+   * ==========================================================
+   */
 
   private isProposalConfirmation(
     message: string,
-    history: any[],
   ): boolean {
-    if (
-      !this.isWaitingForProposalDecision(
-        history,
-      )
-    ) {
-      return false;
-    }
-
     const text =
       message
         .toLowerCase()
@@ -1331,21 +1900,16 @@ Answer naturally and directly.
       'sare',
       'pampu',
       'pampandi',
+      'avunu proposal pampu',
+      'avunu, proposal pampu',
+      'yes send proposal',
+      'yes, send proposal',
     ].includes(text);
   }
 
   private isProposalDecline(
     message: string,
-    history: any[],
   ): boolean {
-    if (
-      !this.isWaitingForProposalDecision(
-        history,
-      )
-    ) {
-      return false;
-    }
-
     const text =
       message
         .toLowerCase()
@@ -1355,13 +1919,14 @@ Answer naturally and directly.
       'no',
       'no thanks',
       'not now',
-      'no, not now',
       'maybe later',
       'dont send',
       "don't send",
       'do not send',
       'vaddu',
       'ippudu vaddu',
+      'changes kavali',
+      'make changes',
     ].includes(text);
   }
 
@@ -1389,47 +1954,52 @@ Answer naturally and directly.
             ) &&
             (
               text.includes(
-                'send',
+                'prepare',
               ) ||
               text.includes(
-                'sent',
+                'send',
               )
-            ) &&
-            text.includes('?')
-          );
-        },
-      );
-  }
-
-  private isWaitingForEmail(
-    history: any[],
-  ): boolean {
-    return (
-      history ?? []
-    )
-      .filter(
-        (item) =>
-          item.role ===
-          'assistant',
-      )
-      .slice(-5)
-      .some(
-        (item) => {
-          const text =
-            item.content
-              ?.toLowerCase() ?? '';
-
-          return (
-            text.includes(
-              'email',
-            ) &&
-            text.includes(
-              'proposal',
             )
           );
         },
       );
   }
+
+  /*
+   * ==========================================================
+   * CLIENT NAME
+   * ==========================================================
+   */
+
+  private extractClientName(
+    message: string,
+  ): string | undefined {
+    const patterns = [
+      /my name is\s+([a-zA-Z][a-zA-Z\s]{1,40})(?:[.!?,]|$)/i,
+      /i am\s+([a-zA-Z][a-zA-Z\s]{1,40})(?:[.!?,]|$)/i,
+      /i'm\s+([a-zA-Z][a-zA-Z\s]{1,40})(?:[.!?,]|$)/i,
+      /this is\s+([a-zA-Z][a-zA-Z\s]{1,40})(?:[.!?,]|$)/i,
+    ];
+
+    for (
+      const pattern of patterns
+    ) {
+      const match =
+        message.match(pattern);
+
+      if (match?.[1]) {
+        return match[1].trim();
+      }
+    }
+
+    return undefined;
+  }
+
+  /*
+   * ==========================================================
+   * EMAIL
+   * ==========================================================
+   */
 
   private extractEmail(
     message: string,
@@ -1441,6 +2011,12 @@ Answer naturally and directly.
 
     return match?.[0];
   }
+
+  /*
+   * ==========================================================
+   * PHONE
+   * ==========================================================
+   */
 
   private extractPhoneNumber(
     message: string,
@@ -1462,30 +2038,95 @@ Answer naturally and directly.
       );
   }
 
-  private extractClientName(
+  /*
+   * ==========================================================
+   * SIMPLE ANSWER
+   * ==========================================================
+   */
+
+  private cleanSimpleAnswer(
     message: string,
-  ): string | undefined {
-    const patterns = [
-      /my name is\s+([a-zA-Z][a-zA-Z\s]{1,40})(?:[.!?,]|$)/i,
-      /i am\s+([a-zA-Z][a-zA-Z\s]{1,40})(?:[.!?,]|$)/i,
-      /i'm\s+([a-zA-Z][a-zA-Z\s]{1,40})(?:[.!?,]|$)/i,
-      /this is\s+([a-zA-Z][a-zA-Z\s]{1,40})(?:[.!?,]|$)/i,
-    ];
-
-    for (
-      const pattern of patterns
-    ) {
-      const match =
-        message.match(pattern);
-
-      if (match?.[1]) {
-        return match[1]
-          .trim();
-      }
-    }
-
-    return undefined;
+  ): string {
+    return message
+      .replace(
+        /^(my name is|i am|i'm|this is|business name is|our business name is)\s+/i,
+        '',
+      )
+      .replace(
+        /[.!?,]+$/,
+        '',
+      )
+      .trim();
   }
+
+  private cleanOptionAnswer(
+    message: string,
+  ): string {
+    return message
+      .replace(
+        /^(other|others)\s*[:\-]?\s*/i,
+        '',
+      )
+      .replace(
+        /[.!?,]+$/,
+        '',
+      )
+      .trim();
+  }
+
+  /*
+   * ==========================================================
+   * GENERIC OPTION CHECK
+   * ==========================================================
+   */
+
+  private isGenericOptionText(
+    value: string,
+  ): boolean {
+    const text =
+      value
+        .toLowerCase()
+        .trim();
+
+    return [
+      'other',
+      'others',
+      'done',
+      'ok',
+      'okay',
+      'yes',
+      'no',
+      'not sure',
+      'not sure recommend',
+      'flexible',
+    ].includes(text);
+  }
+
+  /*
+   * ==========================================================
+   * EMAIL / PHONE CHECK
+   * ==========================================================
+   */
+
+  private looksLikeEmail(
+    value: string,
+  ): boolean {
+    return /@/.test(value);
+  }
+
+  private looksLikePhone(
+    value: string,
+  ): boolean {
+    return /^(?:\+91[\s-]?)?[6-9]\d{9}$/.test(
+      value.replace(/\s/g, ''),
+    );
+  }
+
+  /*
+   * ==========================================================
+   * FEATURES
+   * ==========================================================
+   */
 
   private extractFeatures(
     message: string,
@@ -1503,7 +2144,28 @@ Answer naturally and directly.
       'online order':
         'Online ordering',
 
+      'table booking':
+        'Table booking',
+
+      'table reservation':
+        'Table booking',
+
+      'table reservations':
+        'Table booking',
+
+      reservation:
+        'Table booking',
+
+      booking:
+        'Booking system',
+
+      appointment:
+        'Booking system',
+
       payment:
+        'Payment gateway',
+
+      'payment gateway':
         'Payment gateway',
 
       razorpay:
@@ -1518,14 +2180,14 @@ Answer naturally and directly.
       'contact form':
         'Contact form',
 
-      booking:
-        'Booking system',
+      whatsapp:
+        'WhatsApp',
 
-      appointment:
-        'Booking system',
+      'google maps':
+        'Google Maps',
 
-      reservation:
-        'Booking system',
+      maps:
+        'Google Maps',
 
       login:
         'Authentication',
@@ -1564,7 +2226,9 @@ Answer naturally and directly.
     const features: string[] = [];
 
     for (
-      const key of Object.keys(map)
+      const key of Object.keys(
+        map,
+      )
     ) {
       if (
         text.includes(key)
@@ -1579,6 +2243,12 @@ Answer naturally and directly.
       ...new Set(features),
     ];
   }
+
+  /*
+   * ==========================================================
+   * TECHNOLOGY
+   * ==========================================================
+   */
 
   private extractTechnology(
     message: string,
@@ -1652,6 +2322,12 @@ Answer naturally and directly.
     ].join(', ');
   }
 
+  /*
+   * ==========================================================
+   * SEO
+   * ==========================================================
+   */
+
   private extractSeo(
     message: string,
   ): string | undefined {
@@ -1668,6 +2344,24 @@ Answer naturally and directly.
     }
 
     if (
+      text.includes('local seo')
+    ) {
+      return 'Local SEO';
+    }
+
+    if (
+      text.includes('advanced seo')
+    ) {
+      return 'Advanced SEO';
+    }
+
+    if (
+      text.includes('basic seo')
+    ) {
+      return 'Basic SEO';
+    }
+
+    if (
       text.includes('seo') ||
       text.includes('google ranking') ||
       text.includes('search engine')
@@ -1677,6 +2371,12 @@ Answer naturally and directly.
 
     return undefined;
   }
+
+  /*
+   * ==========================================================
+   * TIMELINE
+   * ==========================================================
+   */
 
   private extractTimeline(
     message: string,
@@ -1720,8 +2420,39 @@ Answer naturally and directly.
       return 'As soon as possible';
     }
 
+    if (
+      text.includes('1 week')
+    ) {
+      return '1 week';
+    }
+
+    if (
+      text.includes('2 weeks')
+    ) {
+      return '2 weeks';
+    }
+
+    if (
+      text.includes('3–4 weeks') ||
+      text.includes('3-4 weeks')
+    ) {
+      return '3–4 weeks';
+    }
+
+    if (
+      text.includes('flexible')
+    ) {
+      return 'Flexible';
+    }
+
     return undefined;
   }
+
+  /*
+   * ==========================================================
+   * COMPLEXITY
+   * ==========================================================
+   */
 
   private extractComplexity(
     message: string,
@@ -1757,6 +2488,12 @@ Answer naturally and directly.
     return undefined;
   }
 
+  /*
+   * ==========================================================
+   * LANGUAGE
+   * ==========================================================
+   */
+
   private detectResponseLanguage(
     message: string,
   ):
@@ -1779,10 +2516,13 @@ Answer naturally and directly.
       'nenu',
       'naku',
       'naaku',
+      'na',
       'meeku',
       'meeru',
+      'mee',
       'cheppu',
       'cheppandi',
+      'kavali',
       'kavali',
       'entha',
       'em',
@@ -1794,6 +2534,7 @@ Answer naturally and directly.
       'ledu',
       'ledhu',
       'ivvu',
+      'ivvandi',
       'ippudu',
       'inka',
       'kuda',
@@ -1818,6 +2559,12 @@ Answer naturally and directly.
     return 'en';
   }
 
+  /*
+   * ==========================================================
+   * FALLBACK
+   * ==========================================================
+   */
+
   private fallbackResponse(
     language:
       | 'en'
@@ -1825,9 +2572,7 @@ Answer naturally and directly.
       | 'te'
       | 'other',
   ): string {
-    if (
-      language === 'te'
-    ) {
+    if (language === 'te') {
       return 'మీకు ఏం కావాలో చెప్పండి.';
     }
 
@@ -1837,13 +2582,64 @@ Answer naturally and directly.
       return 'Meeku em kavalo cheppandi.';
     }
 
-    return 'Tell me what you have in mind.';
+    return 'Tell me what you need.';
   }
 
+  /*
+   * ==========================================================
+   * ESTIMATE CHECK
+   * ==========================================================
+   */
+
+  private hasEnoughForEstimate(
+    project: any,
+  ): boolean {
+    return Boolean(
+      project?.projectType &&
+      project?.industry &&
+      project?.goal &&
+      project?.audience &&
+      project?.features &&
+      this.toList(
+        project.features,
+      ).length > 0 &&
+      project?.technology &&
+      project?.seo,
+    );
+  }
+
+  /*
+   * ==========================================================
+   * ALL REQUIREMENTS
+   * ==========================================================
+   */
+
+  private hasAllProjectRequirements(
+    project: any,
+  ): boolean {
+    return Boolean(
+      project?.name &&
+      project?.projectType &&
+      project?.industry &&
+      project?.goal &&
+      project?.audience &&
+      this.toList(
+        project?.features,
+      ).length > 0 &&
+      project?.technology &&
+      project?.seo &&
+      project?.timeline,
+    );
+  }
+
+  /*
+   * ==========================================================
+   * LIST
+   * ==========================================================
+   */
+
   private toList(
-    value?:
-      | string
-      | string[],
+    value?: string | string[],
   ): string[] {
     if (!value) {
       return [];
@@ -1868,5 +2664,42 @@ Answer naturally and directly.
           item.trim(),
       )
       .filter(Boolean);
+  }
+
+  /*
+   * ==========================================================
+   * GREETING
+   * ==========================================================
+   */
+
+  private isGreeting(
+    message: string,
+  ): boolean {
+    return /^(hi|hii|hello|hey|helo|good morning|good afternoon|good evening|good night)$/i.test(
+      message.trim(),
+    );
+  }
+
+  /*
+   * ==========================================================
+   * THANKS
+   * ==========================================================
+   */
+
+  private isThanks(
+    message: string,
+  ): boolean {
+    return [
+      'thanks',
+      'thank you',
+      'thankyou',
+      'thx',
+      'thanks a lot',
+      'thank you so much',
+    ].includes(
+      message
+        .toLowerCase()
+        .trim(),
+    );
   }
 }

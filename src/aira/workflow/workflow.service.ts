@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 
 import {
   WorkflowContext,
+  WorkflowField,
   WorkflowResult,
   WorkflowStage,
 } from './workflow.types';
@@ -25,11 +26,16 @@ export class WorkflowService {
       );
 
     const nextMissingField =
-      missingInformation.length > 0
-        ? missingInformation[0]
-        : undefined;
+      missingInformation[0];
 
-    const shouldAskQuestion = false;
+    /*
+     * AIRA MUST ask one question whenever
+     * required information is missing.
+     *
+     * Exactly ONE question at a time.
+     */
+    const shouldAskQuestion =
+      Boolean(nextMissingField);
 
     const nextStage =
       this.getNextStage(
@@ -52,16 +58,13 @@ export class WorkflowService {
    * =========================================================
    * CURRENT STAGE
    * =========================================================
-   *
-   * Project status is used when available.
-   * However, status alone must NEVER cause AIRA to skip
-   * genuinely missing information.
    */
 
   private getCurrentStage(
     project: WorkflowContext['project'],
   ): WorkflowStage {
-    const status = project?.status;
+    const status =
+      project?.status;
 
     switch (status) {
       case 'DISCOVERY':
@@ -100,19 +103,18 @@ export class WorkflowService {
    *
    * IMPORTANT:
    *
-   * Budget is NEVER a user input.
-   *
-   * Pricing is calculated automatically.
-   *
-   * Therefore PRICING stage does NOT ask for budget.
+   * - One missing field at a time.
+   * - Budget is NEVER requested.
+   * - Pricing is calculated automatically.
+   * - Email is requested only at proposal stage.
    */
 
   private getMissingInformation(
     stage: WorkflowStage,
     project: WorkflowContext['project'],
     client: WorkflowContext['client'],
-  ): string[] {
-    const missing: string[] = [];
+  ): WorkflowField[] {
+    const missing: WorkflowField[] = [];
 
     /*
      * -------------------------------------------------------
@@ -120,30 +122,32 @@ export class WorkflowService {
      * -------------------------------------------------------
      */
 
-    if (
-      !project?.projectType
-    ) {
+    if (!client?.name) {
+      missing.push('clientName');
+      return missing;
+    }
+
+    if (!project?.name) {
+      missing.push('businessName');
+      return missing;
+    }
+
+    if (!project?.projectType) {
       missing.push('projectType');
       return missing;
     }
 
-    if (
-      !project?.industry
-    ) {
+    if (!project?.industry) {
       missing.push('industry');
       return missing;
     }
 
-    if (
-      !project?.goal
-    ) {
+    if (!project?.goal) {
       missing.push('goal');
       return missing;
     }
 
-    if (
-      !project?.audience
-    ) {
+    if (!project?.audience) {
       missing.push('audience');
       return missing;
     }
@@ -159,9 +163,7 @@ export class WorkflowService {
         project?.features,
       );
 
-    if (
-      features.length === 0
-    ) {
+    if (features.length === 0) {
       missing.push('features');
       return missing;
     }
@@ -172,9 +174,7 @@ export class WorkflowService {
      * -------------------------------------------------------
      */
 
-    if (
-      !project?.technology
-    ) {
+    if (!project?.technology) {
       missing.push('technology');
       return missing;
     }
@@ -185,9 +185,7 @@ export class WorkflowService {
      * -------------------------------------------------------
      */
 
-    if (
-      !project?.seo
-    ) {
+    if (!project?.seo) {
       missing.push('seo');
       return missing;
     }
@@ -198,9 +196,7 @@ export class WorkflowService {
      * -------------------------------------------------------
      */
 
-    if (
-      !project?.timeline
-    ) {
+    if (!project?.timeline) {
       missing.push('timeline');
       return missing;
     }
@@ -210,23 +206,15 @@ export class WorkflowService {
      * PRICING
      * -------------------------------------------------------
      *
-     * Pricing is automatic.
+     * NO budget question.
      *
-     * NEVER ask:
-     * "What is your budget?"
-     *
-     * NEVER make "budget" a blocking workflow field.
+     * PricingService calculates investment automatically.
      */
 
     /*
      * -------------------------------------------------------
      * PROPOSAL
      * -------------------------------------------------------
-     *
-     * Once all project requirements exist, proposal
-     * confirmation happens in AiraOrchestratorService.
-     *
-     * Email is requested only AFTER confirmation.
      */
 
     if (
@@ -236,10 +224,6 @@ export class WorkflowService {
       missing.push('email');
       return missing;
     }
-
-    /*
-     * No missing field.
-     */
 
     return missing;
   }
@@ -252,57 +236,22 @@ export class WorkflowService {
 
   private getNextStage(
     currentStage: WorkflowStage,
-    missingInformation: string[],
+    missingInformation: WorkflowField[],
     project: WorkflowContext['project'],
     client: WorkflowContext['client'],
   ): WorkflowStage {
     /*
-     * If anything is missing, remain logically within
-     * the current workflow area.
+     * If information is missing,
+     * stay in the logical stage.
      */
-
-    if (
-      missingInformation.length > 0
-    ) {
-      return currentStage;
-    }
-
-    /*
-     * Canonical stage order.
-     */
-
-    const stages: WorkflowStage[] = [
-      'DISCOVERY',
-      'REQUIREMENTS',
-      'TECHNOLOGY',
-      'SEO',
-      'TIMELINE',
-      'PRICING',
-      'PROPOSAL',
-      'COMPLETE',
-    ];
-
-    const currentIndex =
-      stages.indexOf(
-        currentStage,
+    if (missingInformation.length > 0) {
+      return this.stageForField(
+        missingInformation[0],
       );
-
-    if (
-      currentIndex === -1
-    ) {
-      return 'DISCOVERY';
-    }
-
-    if (
-      currentIndex >=
-      stages.length - 1
-    ) {
-      return 'COMPLETE';
     }
 
     /*
-     * If all actual requirements are complete,
-     * move toward proposal.
+     * Everything required is complete.
      */
 
     if (
@@ -311,18 +260,63 @@ export class WorkflowService {
       )
     ) {
       if (
-        currentStage ===
-          'TIMELINE' ||
-        currentStage ===
-          'PRICING'
+        currentStage === 'DISCOVERY' ||
+        currentStage === 'REQUIREMENTS' ||
+        currentStage === 'TECHNOLOGY' ||
+        currentStage === 'SEO' ||
+        currentStage === 'TIMELINE' ||
+        currentStage === 'PRICING'
       ) {
         return 'PROPOSAL';
       }
+
+      if (
+        currentStage === 'PROPOSAL' &&
+        client?.email
+      ) {
+        return 'COMPLETE';
+      }
     }
 
-    return stages[
-      currentIndex + 1
-    ];
+    return currentStage;
+  }
+
+  /*
+   * =========================================================
+   * FIELD → STAGE
+   * =========================================================
+   */
+
+  private stageForField(
+    field: WorkflowField,
+  ): WorkflowStage {
+    switch (field) {
+      case 'clientName':
+      case 'businessName':
+      case 'projectType':
+      case 'industry':
+      case 'goal':
+      case 'audience':
+        return 'DISCOVERY';
+
+      case 'features':
+        return 'REQUIREMENTS';
+
+      case 'technology':
+        return 'TECHNOLOGY';
+
+      case 'seo':
+        return 'SEO';
+
+      case 'timeline':
+        return 'TIMELINE';
+
+      case 'email':
+        return 'PROPOSAL';
+
+      default:
+        return 'DISCOVERY';
+    }
   }
 
   /*
@@ -334,27 +328,23 @@ export class WorkflowService {
   private hasAllProjectRequirements(
     project: WorkflowContext['project'],
   ): boolean {
-    if (
-      !project?.projectType
-    ) {
+    if (!project?.name) {
       return false;
     }
 
-    if (
-      !project?.industry
-    ) {
+    if (!project?.projectType) {
       return false;
     }
 
-    if (
-      !project?.goal
-    ) {
+    if (!project?.industry) {
       return false;
     }
 
-    if (
-      !project?.audience
-    ) {
+    if (!project?.goal) {
+      return false;
+    }
+
+    if (!project?.audience) {
       return false;
     }
 
@@ -366,21 +356,15 @@ export class WorkflowService {
       return false;
     }
 
-    if (
-      !project?.technology
-    ) {
+    if (!project?.technology) {
       return false;
     }
 
-    if (
-      !project?.seo
-    ) {
+    if (!project?.seo) {
       return false;
     }
 
-    if (
-      !project?.timeline
-    ) {
+    if (!project?.timeline) {
       return false;
     }
 
@@ -394,32 +378,24 @@ export class WorkflowService {
    */
 
   private toList(
-    value?:
-      | string
-      | string[],
+    value?: string | string[],
   ): string[] {
     if (!value) {
       return [];
     }
 
-    if (
-      Array.isArray(
-        value,
-      )
-    ) {
+    if (Array.isArray(value)) {
       return value
-        .map(
-          (item) =>
-            String(item).trim(),
+        .map((item) =>
+          String(item).trim(),
         )
         .filter(Boolean);
     }
 
     return value
       .split(',')
-      .map(
-        (item) =>
-          item.trim(),
+      .map((item) =>
+        item.trim(),
       )
       .filter(Boolean);
   }
