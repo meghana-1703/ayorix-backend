@@ -8,19 +8,6 @@ export type WorkflowStage =
   | 'PROPOSAL'
   | 'COMPLETE';
 
-export type WorkflowField =
-  | 'clientName'
-  | 'businessName'
-  | 'projectType'
-  | 'industry'
-  | 'goal'
-  | 'audience'
-  | 'features'
-  | 'technology'
-  | 'seo'
-  | 'timeline'
-  | 'email';
-
 export interface WorkflowContext {
   project?: {
     id?: string;
@@ -39,7 +26,6 @@ export interface WorkflowContext {
   };
 
   client?: {
-    id?: string;
     name?: string;
     email?: string;
     phone?: string;
@@ -49,10 +35,7 @@ export interface WorkflowContext {
 export interface WorkflowResult {
   currentStage: WorkflowStage;
   nextStage: WorkflowStage;
-
-  missingInformation: WorkflowField[];
-
-  nextMissingField?: WorkflowField;
-
+  missingInformation: string[];
+  nextMissingField?: string;
   shouldAskQuestion: boolean;
 }

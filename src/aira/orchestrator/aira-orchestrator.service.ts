@@ -45,16 +45,10 @@ export class AiraOrchestratorService {
     const message =
       input.message?.trim() ?? '';
 
-    /*
-     * ========================================================
-     * 1. BASIC VALIDATION
-     * ========================================================
-     */
-
     if (!message) {
       return this.finalResponse(
         input,
-        'Please tell me a little about your project.',
+        'Tell me a little about what you would like to build.',
         {
           intent: 'GENERAL_QUESTION',
           confidence: 1,
@@ -71,7 +65,7 @@ export class AiraOrchestratorService {
 
     /*
      * ========================================================
-     * 2. LOAD MEMORY
+     * LOAD MEMORY
      * ========================================================
      */
 
@@ -100,48 +94,21 @@ export class AiraOrchestratorService {
       history =
         conversation.messages ?? [];
 
-      const storedClient =
+      client =
         await this.memoryService.getClient(
           conversation.clientId,
         );
-
-      if (storedClient) {
-        client = storedClient;
-      }
     }
-
-    /*
-     * ========================================================
-     * 3. LANGUAGE
-     * ========================================================
-     */
 
     const language =
       this.detectResponseLanguage(
         message,
       );
 
-    /*
-     * ========================================================
-     * 4. INTENT
-     * ========================================================
-     */
-
-    const detectedIntent =
+    const intent =
       this.intentService.detect(
         message,
       );
-
-    const decision =
-      this.decisionService.decide(
-        detectedIntent.intent,
-      );
-
-    /*
-     * ========================================================
-     * 5. SAVE USER MESSAGE
-     * ========================================================
-     */
 
     if (input.conversationId) {
       await this.memoryService.saveMessage(
@@ -149,17 +116,86 @@ export class AiraOrchestratorService {
         {
           role: 'user',
           content: message,
-          intent:
-            detectedIntent.intent,
-          confidence:
-            detectedIntent.confidence,
+          intent: intent.intent,
+          confidence: intent.confidence,
         },
       );
     }
 
     /*
      * ========================================================
-     * 6. EXTRACT CLIENT INFORMATION
+     * GREETING
+     * ========================================================
+     *
+     * Greeting must never restart the flow.
+     */
+
+    if (this.isGreeting(message)) {
+      const response =
+        await this.generateNaturalResponse({
+          message,
+          project,
+          client,
+          history,
+          language,
+          instruction: `
+The user greeted AIRA.
+
+Reply warmly and briefly.
+Do not restart the consultation.
+Do not ask a new question.
+If a project is already in progress, acknowledge it naturally.
+`,
+        });
+
+      return this.finalResponse(
+        input,
+        response,
+        intent,
+        this.decisionService.decide(
+          intent.intent,
+        ),
+        project,
+        client,
+      );
+    }
+
+    /*
+     * ========================================================
+     * THANKS
+     * ========================================================
+     */
+
+    if (this.isThanks(message)) {
+      const response =
+        await this.generateNaturalResponse({
+          message,
+          project,
+          client,
+          history,
+          language,
+          instruction: `
+The user thanked AIRA.
+Reply naturally and briefly.
+Do not restart the consultation.
+`,
+        });
+
+      return this.finalResponse(
+        input,
+        response,
+        intent,
+        this.decisionService.decide(
+          intent.intent,
+        ),
+        project,
+        client,
+      );
+    }
+
+    /*
+     * ========================================================
+     * EXTRACT CLIENT DETAILS
      * ========================================================
      */
 
@@ -183,9 +219,7 @@ export class AiraOrchestratorService {
       }
 
       const email =
-        this.extractEmail(
-          message,
-        );
+        this.extractEmail(message);
 
       if (email) {
         client =
@@ -215,17 +249,8 @@ export class AiraOrchestratorService {
 
     /*
      * ========================================================
-     * 7. DETERMINE WHAT AIRA IS WAITING FOR
+     * GET CURRENT QUESTION
      * ========================================================
-     *
-     * This happens BEFORE extraction.
-     *
-     * Example:
-     *
-     * AIRA: What is your business name?
-     * User: ABC Restaurant
-     *
-     * The answer is stored as project.name.
      */
 
     let workflow =
@@ -239,102 +264,89 @@ export class AiraOrchestratorService {
 
     /*
      * ========================================================
-     * 8. CONTEXT-AWARE ANSWER HANDLING
+     * SAVE ANSWER BASED ON EXPECTED FIELD
      * ========================================================
+     *
+     * This is the important part.
+     *
+     * AIRA asks one question.
+     * User answers.
+     * Answer is saved to THAT field.
      */
 
     if (
       input.clientId &&
-      expectedField === 'clientName' &&
-      !client?.name
+      expectedField
     ) {
-      const cleanName =
-        this.cleanSimpleAnswer(
+      const answerData =
+        this.buildAnswerData(
+          expectedField,
           message,
+          project,
         );
 
       if (
-        cleanName &&
-        !this.looksLikeEmail(
-          cleanName,
-        ) &&
-        !this.looksLikePhone(
-          cleanName,
-        )
+        Object.keys(answerData).length >
+        0
       ) {
-        client =
-          await this.memoryService.updateClient(
-            input.clientId,
-            {
-              name: cleanName,
-            },
-          );
+        /*
+         * Client fields
+         */
+
+        if (
+          answerData.__clientName
+        ) {
+          client =
+            await this.memoryService.updateClient(
+              input.clientId,
+              {
+                name:
+                  answerData.__clientName,
+              },
+            );
+        }
+
+        if (
+          answerData.__phone
+        ) {
+          client =
+            await this.memoryService.updateClient(
+              input.clientId,
+              {
+                phone:
+                  answerData.__phone,
+              },
+            );
+        }
+
+        /*
+         * Project fields
+         */
+
+        const projectData = {
+          ...answerData,
+        };
+
+        delete projectData.__clientName;
+        delete projectData.__phone;
+
+        if (
+          project?.id &&
+          Object.keys(projectData).length >
+            0
+        ) {
+          project =
+            await this.memoryService.updateProject(
+              project.id,
+              projectData,
+            );
+        }
       }
     }
 
     /*
-     * BUSINESS NAME
-     */
-
-    if (
-      input.conversationId &&
-      project?.id &&
-      expectedField === 'businessName'
-    ) {
-      const businessName =
-        this.cleanSimpleAnswer(
-          message,
-        );
-
-      if (
-        businessName &&
-        !this.looksLikeEmail(
-          businessName,
-        ) &&
-        !this.looksLikePhone(
-          businessName,
-        )
-      ) {
-        project =
-          await this.memoryService.updateProject(
-            project.id,
-            {
-              name: businessName,
-            },
-          );
-      }
-    }
-
-    /*
      * ========================================================
-     * 9. PROJECT DATA EXTRACTION
-     * ========================================================
-     */
-
-    const understanding =
-      this.buildUnderstanding(
-        message,
-        project,
-        expectedField,
-      );
-
-    if (
-      input.conversationId &&
-      project?.id &&
-      Object.keys(
-        understanding,
-      ).length > 0
-    ) {
-      project =
-        await this.memoryService.updateProject(
-          project.id,
-          understanding,
-        );
-    }
-
-    /*
-     * ========================================================
-     * 10. REFRESH MEMORY
+     * REFRESH MEMORY
      * ========================================================
      */
 
@@ -362,11 +374,15 @@ export class AiraOrchestratorService {
         client =
           refreshedClient;
       }
+
+      history =
+        refreshed?.messages ??
+        history;
     }
 
     /*
      * ========================================================
-     * 11. RECALCULATE WORKFLOW
+     * WORKFLOW AFTER ANSWER
      * ========================================================
      */
 
@@ -378,19 +394,12 @@ export class AiraOrchestratorService {
 
     /*
      * ========================================================
-     * 12. PRICE + TIMELINE
+     * AUTO PRICE / TIMELINE
      * ========================================================
-     *
-     * These are automatic.
-     *
-     * User is NEVER asked for budget.
      */
 
-    let pricing: any =
-      undefined;
-
-    let timeline: any =
-      undefined;
+    let pricing: any;
+    let timeline: any;
 
     if (
       this.hasEnoughForEstimate(
@@ -431,30 +440,37 @@ export class AiraOrchestratorService {
             project.complexity,
         });
 
-      /*
-       * Store automatic price.
-       */
-
       if (
         input.conversationId &&
         project?.id
       ) {
         const updateData: any = {};
 
+        /*
+         * Pricing automatic.
+         * Never ask budget.
+         */
+
         if (!project.budget) {
           updateData.budget =
             `${pricing.currency} ${pricing.estimatedPrice}`;
         }
 
+        /*
+         * Timeline is automatic ONLY if the
+         * user has not selected/provided one.
+         */
+
         if (!project.timeline) {
-          updateData.timeline =
-            `${timeline.estimatedDays} days`;
+          /*
+           * Do NOT save generated timeline here.
+           * Timeline must be asked first.
+           */
         }
 
         if (
-          Object.keys(
-            updateData,
-          ).length > 0
+          Object.keys(updateData).length >
+          0
         ) {
           project =
             await this.memoryService.updateProject(
@@ -463,101 +479,23 @@ export class AiraOrchestratorService {
             );
         }
       }
-
-      workflow =
-        this.workflowService.determine({
-          project,
-          client,
-        });
     }
 
     /*
      * ========================================================
-     * 13. GREETING
+     * RE-CALCULATE WORKFLOW
      * ========================================================
      */
 
-    if (
-      this.isGreeting(
-        message,
-      )
-    ) {
-      const response =
-        await this.generateNaturalResponse({
-          message,
-          project,
-          client,
-          history,
-          language,
-          instruction: `
-The user greeted AIRA.
-
-Reply warmly and briefly.
-
-If the consultation is already in progress,
-do NOT restart it.
-
-Do NOT ask multiple questions.
-`,
-        });
-
-      return this.finalResponse(
-        input,
-        response,
-        detectedIntent,
-        decision,
+    workflow =
+      this.workflowService.determine({
         project,
         client,
-        pricing,
-        timeline,
-        workflow,
-      );
-    }
+      });
 
     /*
      * ========================================================
-     * 14. THANKS
-     * ========================================================
-     */
-
-    if (
-      this.isThanks(
-        message,
-      )
-    ) {
-      const response =
-        await this.generateNaturalResponse({
-          message,
-          project,
-          client,
-          history,
-          language,
-          instruction: `
-The user thanked AIRA.
-
-Reply briefly and naturally.
-
-Do not restart discovery.
-Do not ask another question.
-`,
-        });
-
-      return this.finalResponse(
-        input,
-        response,
-        detectedIntent,
-        decision,
-        project,
-        client,
-        pricing,
-        timeline,
-        workflow,
-      );
-    }
-
-    /*
-     * ========================================================
-     * 15. PROPOSAL DECISION
+     * PROPOSAL DECISION
      * ========================================================
      */
 
@@ -567,7 +505,7 @@ Do not ask another question.
       )
     ) {
       /*
-       * CONFIRM
+       * YES
        */
 
       if (
@@ -575,38 +513,33 @@ Do not ask another question.
           message,
         )
       ) {
-        /*
-         * Email missing
-         */
-
         if (!client?.email) {
-          const emailQuestion =
+          return this.finalResponse(
+            input,
             this.questionText(
               'email',
               language,
-            );
-
-          return this.finalResponse(
-            input,
-            emailQuestion,
-            detectedIntent,
-            decision,
+            ),
+            {
+              intent: 'PROPOSAL',
+              confidence: 1,
+            },
+            {
+              advisor: 'proposal',
+              action: 'prepare_proposal',
+              nextStep: 'collect_email',
+            },
             project,
             client,
             pricing,
             timeline,
             {
               ...workflow,
-              currentStage:
-                'PROPOSAL',
-              nextStage:
-                'PROPOSAL',
-              shouldAskQuestion:
-                true,
-              nextMissingField:
-                'email',
-              missingInformation:
-                ['email'],
+              currentStage: 'PROPOSAL',
+              nextStage: 'PROPOSAL',
+              shouldAskQuestion: true,
+              nextMissingField: 'email',
+              missingInformation: ['email'],
             },
             undefined,
             this.getQuestionOptions(
@@ -617,25 +550,23 @@ Do not ask another question.
         }
 
         /*
-         * Send proposal
+         * Email exists → generate + send proposal.
          */
 
         if (
           project?.id &&
           pricing &&
           timeline &&
-          client.email
+          client?.email
         ) {
           const proposal =
             this.proposalService.generate({
               client,
               project: {
                 ...project,
-
                 timeline:
                   project.timeline ??
                   `${timeline.estimatedDays} days`,
-
                 budget:
                   project.budget ??
                   `${pricing.currency} ${pricing.estimatedPrice}`,
@@ -669,23 +600,18 @@ Do not ask another question.
             {
               advisor: 'proposal',
               action: 'send_proposal',
-              nextStep:
-                'complete_project',
+              nextStep: 'complete',
             },
             project,
             client,
             pricing,
             timeline,
             {
-              currentStage:
-                'COMPLETE',
-              nextStage:
-                'COMPLETE',
+              currentStage: 'COMPLETE',
+              nextStage: 'COMPLETE',
+              shouldAskQuestion: false,
               missingInformation: [],
-              shouldAskQuestion:
-                false,
-              nextMissingField:
-                undefined,
+              nextMissingField: undefined,
             },
             proposal,
             [],
@@ -694,74 +620,50 @@ Do not ask another question.
       }
 
       /*
-       * DECLINE / CHANGES
+       * ======================================================
+       * MAKE CHANGES
+       * ======================================================
        */
 
       if (
-        this.isProposalDecline(
+        this.isProposalChanges(
           message,
         )
       ) {
-        const response =
-          await this.generateNaturalResponse({
-            message,
-            project,
-            client,
-            history,
-            language,
-            instruction: `
-The user does not want to send the proposal yet.
-
-Reply politely.
-
-If they said they want changes,
-acknowledge that.
-
-Do not restart discovery.
-Do not ask multiple questions.
-`,
-          });
-
         return this.finalResponse(
           input,
-          response,
-          detectedIntent,
-          decision,
+          this.getChangesMessage(
+            language,
+          ),
+          {
+            intent: 'PROPOSAL',
+            confidence: 1,
+          },
+          {
+            advisor: 'proposal',
+            action: 'modify_proposal',
+            nextStep: 'collect_changes',
+          },
           project,
           client,
           pricing,
           timeline,
           workflow,
+          undefined,
+          [],
         );
       }
     }
 
     /*
      * ========================================================
-     * 16. EMAIL DIRECT ANSWER
+     * EMAIL DIRECT ANSWER
      * ========================================================
      */
 
-    const suppliedEmail =
-      this.extractEmail(
-        message,
-      );
-
     if (
-      suppliedEmail &&
-      expectedField === 'email'
+      this.extractEmail(message)
     ) {
-      if (input.clientId) {
-        client =
-          await this.memoryService.updateClient(
-            input.clientId,
-            {
-              email:
-                suppliedEmail,
-            },
-          );
-      }
-
       workflow =
         this.workflowService.determine({
           project,
@@ -771,15 +673,8 @@ Do not ask multiple questions.
 
     /*
      * ========================================================
-     * 17. QUESTIONNAIRE CONTROLLER
+     * QUESTIONNAIRE
      * ========================================================
-     *
-     * THIS IS THE MAIN AIRA FLOW.
-     *
-     * One question only.
-     * Options are returned.
-     * "Other" is always available for fields
-     * where predefined options exist.
      */
 
     if (
@@ -789,46 +684,37 @@ Do not ask multiple questions.
       const field =
         workflow.nextMissingField;
 
-      const question =
+      return this.finalResponse(
+        input,
         this.questionText(
           field,
           language,
-        );
-
-      const options =
-        this.getQuestionOptions(
-          field,
-          language,
-        );
-
-      return this.finalResponse(
-        input,
-        question,
-        detectedIntent,
-        decision,
+        ),
+        intent,
+        this.decisionService.decide(
+          intent.intent,
+        ),
         project,
         client,
         pricing,
         timeline,
         workflow,
         undefined,
-        options,
+        this.getQuestionOptions(
+          field,
+          language,
+        ),
       );
     }
 
     /*
      * ========================================================
-     * 18. REQUIREMENTS COMPLETE
+     * ALL REQUIREMENTS COMPLETE
      * ========================================================
      */
 
     if (
-      !workflow.shouldAskQuestion &&
-      workflow.nextMissingField ===
-        undefined &&
-      this.hasAllProjectRequirements(
-        project,
-      )
+      !workflow.nextMissingField
     ) {
       const summary =
         this.buildProjectSummary(
@@ -849,8 +735,7 @@ Do not ask multiple questions.
         {
           advisor: 'proposal',
           action: 'prepare_proposal',
-          nextStep:
-            'confirm_proposal',
+          nextStep: 'confirm_proposal',
         },
         project,
         client,
@@ -858,14 +743,11 @@ Do not ask multiple questions.
         timeline,
         {
           ...workflow,
-          currentStage:
-            'PROPOSAL',
-          nextStage:
-            'PROPOSAL',
-          shouldAskQuestion:
-            false,
-          nextMissingField:
-            undefined,
+          currentStage: 'PROPOSAL',
+          nextStage: 'PROPOSAL',
+          shouldAskQuestion: false,
+          missingInformation: [],
+          nextMissingField: undefined,
         },
         undefined,
         this.getProposalConfirmationOptions(
@@ -876,7 +758,7 @@ Do not ask multiple questions.
 
     /*
      * ========================================================
-     * 19. NATURAL FALLBACK
+     * FALLBACK
      * ========================================================
      */
 
@@ -888,24 +770,22 @@ Do not ask multiple questions.
         history,
         language,
         instruction: `
-Respond naturally and briefly to the user's latest message.
+Respond naturally and briefly.
 
-Do not restart discovery.
-
+Do not restart the consultation.
 Do not ask multiple questions.
-
 Do not ask for budget.
-
-If the application needs a required
-question, the application will ask it separately.
+Do not invent project details.
 `,
       });
 
     return this.finalResponse(
       input,
       response,
-      detectedIntent,
-      decision,
+      intent,
+      this.decisionService.decide(
+        intent.intent,
+      ),
       project,
       client,
       pricing,
@@ -916,411 +796,161 @@ question, the application will ask it separately.
 
   /*
    * ==========================================================
-   * BUILD UNDERSTANDING
+   * ANSWER → FIELD
    * ==========================================================
    */
 
-  private buildUnderstanding(
+  private buildAnswerData(
+    field: string,
     message: string,
     project?: any,
-    expectedField?: string,
   ): Record<string, any> {
-    const lower =
-      message
-        .toLowerCase()
-        .trim();
+    const answer =
+      this.cleanSimpleAnswer(message);
 
-    const data: Record<string, any> = {};
-
-    /*
-     * ========================================================
-     * PROJECT TYPE
-     * ========================================================
-     */
-
-    if (
-      lower.includes('ecommerce') ||
-      lower.includes('e-commerce') ||
-      lower.includes('online store') ||
-      lower.includes('online shop')
-    ) {
-      data.projectType =
-        'E-commerce Website';
-    } else if (
-      lower.includes('web application') ||
-      lower.includes('web app')
-    ) {
-      data.projectType =
-        'Web Application';
-    } else if (
-      lower.includes('portfolio')
-    ) {
-      data.projectType =
-        'Portfolio Website';
-    } else if (
-      lower.includes('website') ||
-      lower.includes('web site')
-    ) {
-      if (!project?.projectType) {
-        data.projectType =
-          'Business Website';
-      }
+    if (!answer) {
+      return {};
     }
 
-    /*
-     * ========================================================
-     * INDUSTRY
-     * ========================================================
-     */
+    switch (field) {
+      case 'clientName':
+        return {
+          __clientName: answer,
+        };
 
-    if (
-      lower.includes('restaurant') ||
-      lower.includes('resturant') ||
-      lower.includes('food') ||
-      lower.includes('cafe')
-    ) {
-      data.industry =
-        'Restaurant / Food';
-    } else if (
-      lower.includes('software') ||
-      lower.includes('technology') ||
-      lower.includes('tech company')
-    ) {
-      data.industry =
-        'Software / Technology';
-    } else if (
-      lower.includes('school') ||
-      lower.includes('college') ||
-      lower.includes('education')
-    ) {
-      data.industry =
-        'Education';
-    } else if (
-      lower.includes('hospital') ||
-      lower.includes('clinic') ||
-      lower.includes('healthcare')
-    ) {
-      data.industry =
-        'Healthcare';
-    } else if (
-      lower.includes('real estate') ||
-      lower.includes('property')
-    ) {
-      data.industry =
-        'Real Estate';
-    } else if (
-      lower.includes('salon') ||
-      lower.includes('beauty') ||
-      lower.includes('spa')
-    ) {
-      data.industry =
-        'Beauty / Salon';
-    } else if (
-      expectedField === 'industry'
-    ) {
-      const custom =
-        this.cleanOptionAnswer(
-          message,
-        );
+      case 'businessName':
+        return {
+          name: answer,
+        };
 
-      if (
-        custom &&
-        !this.isGenericOptionText(
-          custom,
-        )
-      ) {
-        data.industry =
-          custom;
-      }
-    }
-
-    /*
-     * ========================================================
-     * GOAL
-     * ========================================================
-     */
-
-    if (
-      lower.includes('online order') ||
-      lower.includes('online ordering')
-    ) {
-      data.goal =
-        'Generate online orders';
-    }
-
-    if (
-      lower.includes('table reservation') ||
-      lower.includes('table reservations') ||
-      lower.includes('reserve table') ||
-      lower.includes('book a table')
-    ) {
-      data.goal =
-        data.goal
-          ? `${data.goal} and enable table reservations`
-          : 'Enable table reservations';
-    }
-
-    if (
-      lower.includes('more customers') ||
-      lower.includes('more clients') ||
-      lower.includes('increase customers') ||
-      lower.includes('increase sales')
-    ) {
-      data.goal =
-        'Generate leads and attract more customers';
-    } else if (
-      lower.includes('generate leads') ||
-      lower.includes('more leads')
-    ) {
-      data.goal =
-        'Generate leads';
-    } else if (
-      lower.includes('sell products') ||
-      lower.includes('sell online')
-    ) {
-      data.goal =
-        'Sell products online';
-    } else if (
-      lower.includes('brand presence') ||
-      lower.includes('branding')
-    ) {
-      data.goal =
-        'Build brand presence';
-    } else if (
-      expectedField === 'goal'
-    ) {
-      const custom =
-        this.cleanOptionAnswer(
-          message,
-        );
-
-      if (
-        custom &&
-        !this.isGenericOptionText(
-          custom,
-        )
-      ) {
-        data.goal =
-          custom;
-      }
-    }
-
-    /*
-     * ========================================================
-     * AUDIENCE
-     * ========================================================
-     */
-
-    if (
-      lower.includes('local customer') ||
-      lower.includes('local customers') ||
-      lower.includes('nearby customers')
-    ) {
-      data.audience =
-        'Local customers';
-    } else if (
-      lower.includes('small business') ||
-      lower.includes('small businesses')
-    ) {
-      data.audience =
-        'Small businesses';
-    } else if (
-      lower.includes('startup') ||
-      lower.includes('startups')
-    ) {
-      data.audience =
-        'Startups';
-    } else if (
-      lower.includes('student') ||
-      lower.includes('students')
-    ) {
-      data.audience =
-        'Students';
-    } else if (
-      lower.includes('professional') ||
-      lower.includes('professionals')
-    ) {
-      data.audience =
-        'Professionals';
-    } else if (
-      expectedField === 'audience'
-    ) {
-      const custom =
-        this.cleanOptionAnswer(
-          message,
-        );
-
-      if (
-        custom &&
-        !this.isGenericOptionText(
-          custom,
-        )
-      ) {
-        data.audience =
-          custom;
-      }
-    }
-
-    /*
-     * ========================================================
-     * FEATURES
-     * ========================================================
-     */
-
-    const features =
-      this.extractFeatures(
-        message,
-      );
-
-    if (features.length > 0) {
-      const existing =
-        this.toList(
-          project?.features,
-        );
-
-      data.features = [
-        ...new Set([
-          ...existing,
-          ...features,
-        ]),
-      ];
-    }
-
-    /*
-     * "Other" typed feature
-     */
-
-    if (
-      expectedField === 'features' &&
-      features.length === 0 &&
-      !this.isGenericOptionText(
-        message,
-      )
-    ) {
-      const custom =
-        this.cleanOptionAnswer(
-          message,
-        );
-
-      if (custom) {
-        const existing =
-          this.toList(
-            project?.features,
+      case 'phone': {
+        const phone =
+          this.extractPhoneNumber(
+            message,
           );
 
-        data.features = [
-          ...new Set([
-            ...existing,
-            custom,
-          ]),
-        ];
+        return phone
+          ? {
+              __phone: phone,
+            }
+          : {};
       }
-    }
 
-    /*
-     * ========================================================
-     * TECHNOLOGY
-     * ========================================================
-     */
+      case 'industry':
+        return {
+          industry:
+            this.normalizeIndustry(
+              answer,
+            ),
+        };
 
-    const technology =
-      this.extractTechnology(
-        message,
-      );
+      case 'projectType':
+        return {
+          projectType:
+            this.normalizeProjectType(
+              answer,
+            ),
+        };
 
-    if (technology) {
-      data.technology =
-        technology;
-    } else if (
-      expectedField === 'technology'
-    ) {
-      const custom =
-        this.cleanOptionAnswer(
-          message,
-        );
+      case 'goal':
+        return {
+          goal:
+            this.normalizeGoal(
+              answer,
+            ),
+        };
 
-      if (
-        custom &&
-        !this.isGenericOptionText(
-          custom,
-        )
-      ) {
-        data.technology =
-          custom;
+      case 'audience':
+        return {
+          audience:
+            this.normalizeAudience(
+              answer,
+            ),
+        };
+
+      case 'features': {
+        /*
+         * "Done" means existing features are enough.
+         * "Other" alone is NOT saved.
+         */
+
+        if (
+          /^done$/i.test(answer) ||
+          /^other$/i.test(answer)
+        ) {
+          return {};
+        }
+
+        const newFeatures =
+          this.extractFeatures(
+            message,
+          );
+
+        /*
+         * If known feature exists.
+         */
+
+        if (newFeatures.length > 0) {
+          return {
+            features: [
+              ...new Set([
+                ...this.toList(
+                  project?.features,
+                ),
+                ...newFeatures,
+              ]),
+            ],
+          };
+        }
+
+        /*
+         * Custom Other feature.
+         */
+
+        return {
+          features: [
+            ...new Set([
+              ...this.toList(
+                project?.features,
+              ),
+              answer,
+            ]),
+          ],
+        };
       }
+
+      case 'technology':
+        return {
+          technology:
+            this.normalizeTechnology(
+              answer,
+            ),
+        };
+
+      case 'seo':
+        return {
+          seo:
+            this.normalizeSeo(
+              answer,
+            ),
+        };
+
+      case 'timeline':
+        return {
+          timeline:
+            this.normalizeTimeline(
+              answer,
+            ),
+        };
+
+      default:
+        return {};
     }
-
-    /*
-     * ========================================================
-     * SEO
-     * ========================================================
-     */
-
-    const seo =
-      this.extractSeo(
-        message,
-      );
-
-    if (seo) {
-      data.seo =
-        seo;
-    }
-
-    /*
-     * ========================================================
-     * TIMELINE
-     * ========================================================
-     */
-
-    const timeline =
-      this.extractTimeline(
-        message,
-      );
-
-    if (timeline) {
-      data.timeline =
-        timeline;
-    } else if (
-      expectedField === 'timeline'
-    ) {
-      const custom =
-        this.cleanOptionAnswer(
-          message,
-        );
-
-      if (
-        custom &&
-        !this.isGenericOptionText(
-          custom,
-        )
-      ) {
-        data.timeline =
-          custom;
-      }
-    }
-
-    /*
-     * ========================================================
-     * COMPLEXITY
-     * ========================================================
-     */
-
-    const complexity =
-      this.extractComplexity(
-        message,
-      );
-
-    if (complexity) {
-      data.complexity =
-        complexity;
-    }
-
-    return data;
   }
 
   /*
    * ==========================================================
-   * QUESTION TEXT
+   * QUESTIONS
    * ==========================================================
    */
 
@@ -1334,18 +964,14 @@ question, the application will ask it separately.
   ): string {
     const questions: Record<
       string,
-      {
-        en: string;
-        'te-en': string;
-        te: string;
-      }
+      any
     > = {
       clientName: {
-        en: 'Great! Before we continue, what’s your name?',
+        en: 'Before we continue, what’s your name?',
         'te-en':
-          'Great! Continue cheyyadaniki mundu, mee name enti?',
+          'Continue cheyyadaniki mundu, mee name enti?',
         te:
-          'సరే! కొనసాగించే ముందు మీ పేరు ఏమిటి?',
+          'కొనసాగించే ముందు మీ పేరు ఏమిటి?',
       },
 
       businessName: {
@@ -1356,12 +982,12 @@ question, the application will ask it separately.
           'మీ business పేరు ఏమిటి?',
       },
 
-      projectType: {
-        en: 'What kind of website would you like?',
+      phone: {
+        en: 'What mobile number can I use to contact you?',
         'te-en':
-          'Meeku ye type of website kavali?',
+          'Mimmalni contact cheyyadaniki mee mobile number cheppandi.',
         te:
-          'మీకు ఎలాంటి website కావాలి?',
+          'మిమ్మల్ని సంప్రదించడానికి మీ mobile number చెప్పండి.',
       },
 
       industry: {
@@ -1370,6 +996,14 @@ question, the application will ask it separately.
           'Mee business ye type ki belong avuthundi?',
         te:
           'మీ business ఏ రకానికి చెందుతుంది?',
+      },
+
+      projectType: {
+        en: 'What kind of website would you like?',
+        'te-en':
+          'Meeku ye type of website kavali?',
+        te:
+          'మీకు ఎలాంటి website కావాలి?',
       },
 
       goal: {
@@ -1451,11 +1085,6 @@ question, the application will ask it separately.
    * ==========================================================
    * OPTIONS
    * ==========================================================
-   *
-   * Every selectable questionnaire field gets an "Other"
-   * option.
-   *
-   * Frontend should show a text input when Other is selected.
    */
 
   private getQuestionOptions(
@@ -1486,6 +1115,7 @@ question, the application will ask it separately.
         'E-commerce Website',
         'Web Application',
         'Portfolio Website',
+        'Not sure — recommend',
         'Other',
       ],
 
@@ -1543,6 +1173,8 @@ question, the application will ask it separately.
         'Flexible',
         'Other',
       ],
+
+      email: [],
     };
 
     return options[field] ?? [];
@@ -1550,576 +1182,247 @@ question, the application will ask it separately.
 
   /*
    * ==========================================================
-   * PROPOSAL OPTIONS
+   * NORMALIZERS
    * ==========================================================
    */
 
-  private getProposalConfirmationOptions(
-    language:
-      | 'en'
-      | 'te-en'
-      | 'te'
-      | 'other',
-  ): string[] {
-    if (language === 'te') {
-      return [
-        'అవును, proposal పంపండి',
-        'మార్పులు చేయాలి',
-      ];
+  private normalizeIndustry(
+    value: string,
+  ): string {
+    const text =
+      value.toLowerCase();
+
+    if (
+      text.includes('restaurant') ||
+      text.includes('food') ||
+      text.includes('cafe') ||
+      text.includes('hotel')
+    ) {
+      return 'Restaurant / Food';
     }
 
-    if (language === 'te-en') {
-      return [
-        'Avunu, proposal pampu',
-        'Changes kavali',
-      ];
+    if (
+      text.includes('salon') ||
+      text.includes('beauty') ||
+      text.includes('spa')
+    ) {
+      return 'Beauty / Salon';
     }
 
-    return [
-      'Yes, send proposal',
-      'Make changes',
-    ];
+    if (
+      text.includes('clinic') ||
+      text.includes('hospital') ||
+      text.includes('health')
+    ) {
+      return 'Healthcare';
+    }
+
+    if (
+      text.includes('school') ||
+      text.includes('college') ||
+      text.includes('education')
+    ) {
+      return 'Education';
+    }
+
+    if (
+      text.includes('real estate') ||
+      text.includes('property')
+    ) {
+      return 'Real Estate';
+    }
+
+    if (
+      text.includes('technology') ||
+      text.includes('software') ||
+      text.includes('tech')
+    ) {
+      return 'Software / Technology';
+    }
+
+    if (
+      text.includes('e-commerce') ||
+      text.includes('ecommerce')
+    ) {
+      return 'E-commerce';
+    }
+
+    return value;
   }
 
-  /*
-   * ==========================================================
-   * SUMMARY
-   * ==========================================================
-   */
-
-  private buildProjectSummary(
-    project: any,
-    client: any,
-    pricing: any,
-    timeline: any,
-    language:
-      | 'en'
-      | 'te-en'
-      | 'te'
-      | 'other',
+  private normalizeProjectType(
+    value: string,
   ): string {
-    const features =
-      this.toList(
-        project?.features,
-      );
+    const text =
+      value.toLowerCase();
 
-    const price =
-      pricing
-        ? `${pricing.currency} ${pricing.estimatedPrice}`
-        : project?.budget ??
-          'To be confirmed';
+    if (
+      text.includes('ecommerce') ||
+      text.includes('e-commerce')
+    ) {
+      return 'E-commerce Website';
+    }
+
+    if (
+      text.includes('web application') ||
+      text.includes('web app')
+    ) {
+      return 'Web Application';
+    }
+
+    if (
+      text.includes('portfolio')
+    ) {
+      return 'Portfolio Website';
+    }
+
+    if (
+      text.includes('business website')
+    ) {
+      return 'Business Website';
+    }
+
+    if (
+      text.includes('not sure')
+    ) {
+      return 'Not sure — recommend';
+    }
+
+    return value;
+  }
+
+  private normalizeGoal(
+    value: string,
+  ): string {
+    const text =
+      value.toLowerCase();
+
+    if (
+      text.includes('online order')
+    ) {
+      return 'Generate online orders';
+    }
+
+    if (
+      text.includes('customer')
+    ) {
+      return 'Generate leads and attract more customers';
+    }
+
+    if (
+      text.includes('lead')
+    ) {
+      return 'Generate leads';
+    }
+
+    if (
+      text.includes('showcase')
+    ) {
+      return 'Showcase services';
+    }
+
+    if (
+      text.includes('booking') ||
+      text.includes('reservation')
+    ) {
+      return 'Enable bookings / reservations';
+    }
+
+    return value;
+  }
+
+  private normalizeAudience(
+    value: string,
+  ): string {
+    return value;
+  }
+
+  private normalizeTechnology(
+    value: string,
+  ): string {
+    if (
+      /not sure/i.test(value)
+    ) {
+      return 'Not sure — recommend';
+    }
+
+    return value;
+  }
+
+  private normalizeSeo(
+    value: string,
+  ): string {
+    const text =
+      value.toLowerCase();
+
+    if (
+      text.includes('no seo')
+    ) {
+      return 'No SEO';
+    }
+
+    if (
+      text.includes('local seo')
+    ) {
+      return 'Local SEO';
+    }
+
+    if (
+      text.includes('advanced seo')
+    ) {
+      return 'Advanced SEO';
+    }
+
+    if (
+      text.includes('basic seo')
+    ) {
+      return 'Basic SEO';
+    }
+
+    return value;
+  }
+
+  private normalizeTimeline(
+    value: string,
+  ): string {
+    const text =
+      value.toLowerCase();
+
+    if (
+      text.includes('flexible')
+    ) {
+      return 'Flexible';
+    }
+
+    if (
+      text.includes('1 week')
+    ) {
+      return '1 week';
+    }
+
+    if (
+      text.includes('2 weeks')
+    ) {
+      return '2 weeks';
+    }
+
+    if (
+      text.includes('3–4 weeks') ||
+      text.includes('3-4 weeks')
+    ) {
+      return '3–4 weeks';
+    }
 
     const days =
-      timeline
-        ? `${timeline.estimatedDays} days`
-        : project?.timeline ??
-          'To be confirmed';
-
-    if (language === 'te') {
-      return `
-Mee project requirements complete ayyayi. ❤️
-
-Business: ${project?.name ?? '-'}
-Business Type: ${project?.industry ?? '-'}
-Website: ${project?.projectType ?? '-'}
-Goal: ${project?.goal ?? '-'}
-Audience: ${project?.audience ?? '-'}
-Features: ${features.join(', ') || '-'}
-Technology: ${project?.technology ?? '-'}
-SEO: ${project?.seo ?? '-'}
-Timeline: ${days}
-Estimated Investment: ${price}
-
-Proposal prepare cheyyala?
-`.trim();
-    }
-
-    if (language === 'te-en') {
-      return `
-Mee project requirements complete ayyayi. ❤️
-
-Business: ${project?.name ?? '-'}
-Business Type: ${project?.industry ?? '-'}
-Website: ${project?.projectType ?? '-'}
-Goal: ${project?.goal ?? '-'}
-Audience: ${project?.audience ?? '-'}
-Features: ${features.join(', ') || '-'}
-Technology: ${project?.technology ?? '-'}
-SEO: ${project?.seo ?? '-'}
-Timeline: ${days}
-Estimated Investment: ${price}
-
-Proposal prepare cheyyala?
-`.trim();
-    }
-
-    return `
-Your project requirements are complete. ❤️
-
-Business: ${project?.name ?? '-'}
-Business Type: ${project?.industry ?? '-'}
-Website: ${project?.projectType ?? '-'}
-Goal: ${project?.goal ?? '-'}
-Audience: ${project?.audience ?? '-'}
-Features: ${features.join(', ') || '-'}
-Technology: ${project?.technology ?? '-'}
-SEO: ${project?.seo ?? '-'}
-Timeline: ${days}
-Estimated Investment: ${price}
-
-Would you like me to prepare your proposal?
-`.trim();
-  }
-
-  /*
-   * ==========================================================
-   * FINAL RESPONSE
-   * ==========================================================
-   */
-
-  private async finalResponse(
-    input: {
-      conversationId?: string;
-    },
-    message: string,
-    intent: any,
-    decision: any,
-    project?: any,
-    client?: any,
-    pricing?: any,
-    timeline?: any,
-    workflow?: any,
-    proposal?: any,
-    options: string[] = [],
-  ) {
-    const finalMessage =
-      message?.trim() ||
-      'Please tell me a little about your project.';
-
-    if (input.conversationId) {
-      await this.memoryService.saveMessage(
-        input.conversationId,
-        {
-          role: 'assistant',
-          content: finalMessage,
-          intent:
-            intent?.intent,
-          confidence:
-            intent?.confidence,
-        },
-      );
-    }
-
-    return {
-      message: finalMessage,
-
-      options,
-
-      intent,
-      decision,
-
-      workflow:
-        workflow ?? {
-          currentStage:
-            project?.status ??
-            'DISCOVERY',
-
-          nextStage:
-            'DISCOVERY',
-
-          missingInformation: [],
-
-          shouldAskQuestion:
-            false,
-        },
-
-      pricing,
-      timeline,
-      proposal,
-
-      llm: {
-        provider: 'openrouter',
-        model: 'aira-natural',
-      },
-    };
-  }
-
-  /*
-   * ==========================================================
-   * NATURAL RESPONSE
-   * ==========================================================
-   */
-
-  private async generateNaturalResponse(
-    params: {
-      message: string;
-      project: any;
-      client: any;
-      history: any[];
-      language:
-        | 'en'
-        | 'te-en'
-        | 'te'
-        | 'other';
-      instruction: string;
-    },
-  ): Promise<string> {
-    const systemPrompt = `
-You are AIRA, the friendly AI project consultant for AYORIX Digital Solutions.
-
-You are helpful, natural and professional.
-
-IMPORTANT:
-The application controls the questionnaire flow.
-
-Never invent required information.
-
-Never skip required questions.
-
-Never ask multiple questions.
-
-Never ask for budget.
-
-Never restart discovery.
-
-Never mention internal systems, workflow,
-database, extraction or implementation details.
-
-Language:
-- English -> English
-- Roman Telugu / Telugu-English -> Roman Telugu + English
-- Telugu script -> Telugu script
-
-Keep responses concise.
-
-${params.instruction}
-`;
-
-    const userPrompt = `
-USER MESSAGE:
-${params.message}
-
-PROJECT MEMORY:
-${JSON.stringify(
-  params.project ?? {},
-  null,
-  2,
-)}
-
-CLIENT MEMORY:
-${JSON.stringify(
-  params.client ?? {},
-  null,
-  2,
-)}
-
-RECENT HISTORY:
-${JSON.stringify(
-  params.history.slice(-10),
-  null,
-  2,
-)}
-
-Respond only to the user's latest message.
-`;
-
-    try {
-      const llm =
-        await this.llmService.generate({
-          systemPrompt,
-          userPrompt,
-        });
-
-      const content =
-        llm.content?.trim();
-
-      if (content) {
-        return content;
-      }
-    } catch {
-      // fallback
-    }
-
-    return this.fallbackResponse(
-      params.language,
-    );
-  }
-
-  /*
-   * ==========================================================
-   * PROPOSAL SENT
-   * ==========================================================
-   */
-
-  private getProposalSentMessage(
-    language:
-      | 'en'
-      | 'te-en'
-      | 'te'
-      | 'other',
-  ): string {
-    if (language === 'te') {
-      return 'Mee proposal successfully email ki pampinchanu. Thank you! ❤️';
-    }
-
-    if (language === 'te-en') {
-      return 'Mee proposal successfully email ki pampinchanu. Thank you! ❤️';
-    }
-
-    return 'Your proposal has been successfully sent to your email. Thank you! ❤️';
-  }
-
-  /*
-   * ==========================================================
-   * PROPOSAL CONFIRMATION
-   * ==========================================================
-   */
-
-  private isProposalConfirmation(
-    message: string,
-  ): boolean {
-    const text =
-      message
-        .toLowerCase()
-        .trim();
-
-    return [
-      'yes',
-      'yeah',
-      'yep',
-      'sure',
-      'okay',
-      'ok',
-      'send it',
-      'send proposal',
-      'send the proposal',
-      'go ahead',
-      'yes please',
-      'send',
-      'avunu',
-      'sare',
-      'pampu',
-      'pampandi',
-      'avunu proposal pampu',
-      'avunu, proposal pampu',
-      'yes send proposal',
-      'yes, send proposal',
-    ].includes(text);
-  }
-
-  private isProposalDecline(
-    message: string,
-  ): boolean {
-    const text =
-      message
-        .toLowerCase()
-        .trim();
-
-    return [
-      'no',
-      'no thanks',
-      'not now',
-      'maybe later',
-      'dont send',
-      "don't send",
-      'do not send',
-      'vaddu',
-      'ippudu vaddu',
-      'changes kavali',
-      'make changes',
-    ].includes(text);
-  }
-
-  private isWaitingForProposalDecision(
-    history: any[],
-  ): boolean {
-    return (
-      history ?? []
-    )
-      .filter(
-        (item) =>
-          item.role ===
-          'assistant',
-      )
-      .slice(-5)
-      .some(
-        (item) => {
-          const text =
-            item.content
-              ?.toLowerCase() ?? '';
-
-          return (
-            text.includes(
-              'proposal',
-            ) &&
-            (
-              text.includes(
-                'prepare',
-              ) ||
-              text.includes(
-                'send',
-              )
-            )
-          );
-        },
-      );
-  }
-
-  /*
-   * ==========================================================
-   * CLIENT NAME
-   * ==========================================================
-   */
-
-  private extractClientName(
-    message: string,
-  ): string | undefined {
-    const patterns = [
-      /my name is\s+([a-zA-Z][a-zA-Z\s]{1,40})(?:[.!?,]|$)/i,
-      /i am\s+([a-zA-Z][a-zA-Z\s]{1,40})(?:[.!?,]|$)/i,
-      /i'm\s+([a-zA-Z][a-zA-Z\s]{1,40})(?:[.!?,]|$)/i,
-      /this is\s+([a-zA-Z][a-zA-Z\s]{1,40})(?:[.!?,]|$)/i,
-    ];
-
-    for (
-      const pattern of patterns
-    ) {
-      const match =
-        message.match(pattern);
-
-      if (match?.[1]) {
-        return match[1].trim();
-      }
-    }
-
-    return undefined;
-  }
-
-  /*
-   * ==========================================================
-   * EMAIL
-   * ==========================================================
-   */
-
-  private extractEmail(
-    message: string,
-  ): string | undefined {
-    const match =
-      message.match(
-        /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i,
+      text.match(
+        /(\d+)\s*days?/,
       );
 
-    return match?.[0];
-  }
-
-  /*
-   * ==========================================================
-   * PHONE
-   * ==========================================================
-   */
-
-  private extractPhoneNumber(
-    message: string,
-  ): string | undefined {
-    const match =
-      message.match(
-        /(?:\+91[\s-]?)?[6-9]\d{9}/,
-      );
-
-    if (!match) {
-      return undefined;
+    if (days?.[1]) {
+      return `${days[1]} days`;
     }
 
-    return match[0]
-      .replace(/\D/g, '')
-      .replace(
-        /^91(?=\d{10}$)/,
-        '',
-      );
-  }
-
-  /*
-   * ==========================================================
-   * SIMPLE ANSWER
-   * ==========================================================
-   */
-
-  private cleanSimpleAnswer(
-    message: string,
-  ): string {
-    return message
-      .replace(
-        /^(my name is|i am|i'm|this is|business name is|our business name is)\s+/i,
-        '',
-      )
-      .replace(
-        /[.!?,]+$/,
-        '',
-      )
-      .trim();
-  }
-
-  private cleanOptionAnswer(
-    message: string,
-  ): string {
-    return message
-      .replace(
-        /^(other|others)\s*[:\-]?\s*/i,
-        '',
-      )
-      .replace(
-        /[.!?,]+$/,
-        '',
-      )
-      .trim();
-  }
-
-  /*
-   * ==========================================================
-   * GENERIC OPTION CHECK
-   * ==========================================================
-   */
-
-  private isGenericOptionText(
-    value: string,
-  ): boolean {
-    const text =
-      value
-        .toLowerCase()
-        .trim();
-
-    return [
-      'other',
-      'others',
-      'done',
-      'ok',
-      'okay',
-      'yes',
-      'no',
-      'not sure',
-      'not sure recommend',
-      'flexible',
-    ].includes(text);
-  }
-
-  /*
-   * ==========================================================
-   * EMAIL / PHONE CHECK
-   * ==========================================================
-   */
-
-  private looksLikeEmail(
-    value: string,
-  ): boolean {
-    return /@/.test(value);
-  }
-
-  private looksLikePhone(
-    value: string,
-  ): boolean {
-    return /^(?:\+91[\s-]?)?[6-9]\d{9}$/.test(
-      value.replace(/\s/g, ''),
-    );
+    return value;
   }
 
   /*
@@ -2207,292 +1510,508 @@ Respond only to the user's latest message.
       cms:
         'CMS',
 
-      search:
-        'Search',
-
-      'live chat':
-        'Live chat',
-
-      chat:
-        'Live chat',
-
       reviews:
         'Reviews / Testimonials',
 
       testimonials:
         'Reviews / Testimonials',
+
+      'live chat':
+        'Live chat',
     };
 
-    const features: string[] = [];
+    const result: string[] = [];
 
-    for (
-      const key of Object.keys(
-        map,
-      )
-    ) {
-      if (
-        text.includes(key)
-      ) {
-        features.push(
-          map[key],
-        );
+    for (const key of Object.keys(map)) {
+      if (text.includes(key)) {
+        result.push(map[key]);
       }
     }
 
     return [
-      ...new Set(features),
+      ...new Set(result),
     ];
   }
 
   /*
    * ==========================================================
-   * TECHNOLOGY
+   * PROPOSAL
    * ==========================================================
    */
 
-  private extractTechnology(
+  private isWaitingForProposalDecision(
+    history: any[],
+  ): boolean {
+    return (
+      history ?? []
+    )
+      .filter(
+        (item) =>
+          item.role === 'assistant',
+      )
+      .slice(-5)
+      .some((item) => {
+        const text =
+          item.content
+            ?.toLowerCase() ?? '';
+
+        return (
+          text.includes(
+            'proposal',
+          ) &&
+          (
+            text.includes(
+              'prepare',
+            ) ||
+            text.includes(
+              'send',
+            )
+          )
+        );
+      });
+  }
+
+  private isProposalConfirmation(
     message: string,
-  ): string | undefined {
-    const text =
-      message.toLowerCase();
+  ): boolean {
+    return [
+      'yes',
+      'yeah',
+      'yep',
+      'sure',
+      'okay',
+      'ok',
+      'send it',
+      'send',
+      'send proposal',
+      'send the proposal',
+      'go ahead',
+      'yes please',
+      'avunu',
+      'sare',
+      'pampu',
+      'pampandi',
+      'avunu proposal pampu',
+      'avunu, proposal pampu',
+      'yes send proposal',
+      'yes, send proposal',
+    ].includes(
+      message
+        .toLowerCase()
+        .trim(),
+    );
+  }
 
-    const technologies: string[] = [];
+  private isProposalChanges(
+    message: string,
+  ): boolean {
+    return [
+      'make changes',
+      'changes',
+      'change',
+      'edit',
+      'modify',
+      'changes kavali',
+      'change kavali',
+      'marpulu kavali',
+    ].includes(
+      message
+        .toLowerCase()
+        .trim(),
+    );
+  }
 
-    if (
-      text.includes('react')
-    ) {
-      technologies.push(
-        'React',
-      );
+  private getChangesMessage(
+    language:
+      | 'en'
+      | 'te-en'
+      | 'te'
+      | 'other',
+  ): string {
+    if (language === 'te') {
+      return 'Sure. Mee project lo em changes kavalo cheppandi.';
     }
 
-    if (
-      text.includes('tailwind')
-    ) {
-      technologies.push(
-        'Tailwind CSS',
-      );
+    if (language === 'te-en') {
+      return 'Sure. Mee project lo em changes kavalo cheppandi.';
     }
 
+    return 'Sure. Tell me what you would like to change in the project.';
+  }
+
+  private getProposalSentMessage(
+    language:
+      | 'en'
+      | 'te-en'
+      | 'te'
+      | 'other',
+  ): string {
     if (
-      text.includes('next.js') ||
-      text.includes('nextjs')
+      language === 'te' ||
+      language === 'te-en'
     ) {
-      technologies.push(
-        'Next.js',
-      );
+      return 'Mee proposal successfully email ki pampinchanu. Thank you! ❤️';
     }
 
-    if (
-      text.includes('nestjs') ||
-      text.includes('nest.js')
-    ) {
-      technologies.push(
-        'NestJS',
+    return 'Your proposal has been successfully sent to your email. Thank you! ❤️';
+  }
+
+  /*
+   * ==========================================================
+   * SUMMARY
+   * ==========================================================
+   */
+
+  private buildProjectSummary(
+    project: any,
+    client: any,
+    pricing: any,
+    timeline: any,
+    language:
+      | 'en'
+      | 'te-en'
+      | 'te'
+      | 'other',
+  ): string {
+    const features =
+      this.toList(
+        project?.features,
       );
-    }
+
+    const price =
+      pricing
+        ? `${pricing.currency} ${pricing.estimatedPrice}`
+        : 'To be confirmed';
+
+    const days =
+      project?.timeline ??
+      (timeline
+        ? `${timeline.estimatedDays} days`
+        : 'To be confirmed');
 
     if (
-      text.includes('postgres') ||
-      text.includes('postgresql')
+      language === 'te' ||
+      language === 'te-en'
     ) {
-      technologies.push(
-        'PostgreSQL',
-      );
+      return `
+Mee project requirements complete ayyayi. ❤️
+
+Business: ${project?.name ?? '-'}
+Business Type: ${project?.industry ?? '-'}
+Website: ${project?.projectType ?? '-'}
+Goal: ${project?.goal ?? '-'}
+Audience: ${project?.audience ?? '-'}
+Features: ${features.join(', ') || '-'}
+Technology: ${project?.technology ?? '-'}
+SEO: ${project?.seo ?? '-'}
+Timeline: ${days}
+Estimated Investment: ${price}
+
+Proposal prepare cheyyala?
+`.trim();
     }
 
-    if (
-      text.includes('python')
-    ) {
-      technologies.push(
-        'Python',
-      );
-    }
+    return `
+Your project requirements are complete. ❤️
 
+Business: ${project?.name ?? '-'}
+Business Type: ${project?.industry ?? '-'}
+Website: ${project?.projectType ?? '-'}
+Goal: ${project?.goal ?? '-'}
+Audience: ${project?.audience ?? '-'}
+Features: ${features.join(', ') || '-'}
+Technology: ${project?.technology ?? '-'}
+SEO: ${project?.seo ?? '-'}
+Timeline: ${days}
+Estimated Investment: ${price}
+
+Would you like me to prepare your proposal?
+`.trim();
+  }
+
+  private getProposalConfirmationOptions(
+    language:
+      | 'en'
+      | 'te-en'
+      | 'te'
+      | 'other',
+  ): string[] {
     if (
-      technologies.length === 0
+      language === 'te' ||
+      language === 'te-en'
     ) {
-      return undefined;
+      return [
+        'Avunu, proposal pampu',
+        'Make changes',
+      ];
     }
 
     return [
-      ...new Set(
-        technologies,
-      ),
-    ].join(', ');
+      'Yes, send proposal',
+      'Make changes',
+    ];
   }
 
   /*
    * ==========================================================
-   * SEO
+   * NATURAL RESPONSE
    * ==========================================================
    */
 
-  private extractSeo(
+  private async generateNaturalResponse(
+    params: {
+      message: string;
+      project: any;
+      client: any;
+      history: any[];
+      language:
+        | 'en'
+        | 'te-en'
+        | 'te'
+        | 'other';
+      instruction: string;
+    },
+  ): Promise<string> {
+    const systemPrompt = `
+You are AIRA, the friendly AI project consultant for AYORIX Digital Solutions.
+
+Be natural, warm and professional.
+
+The application controls the consultation flow.
+
+Rules:
+- Never restart the consultation.
+- Never ask multiple questions.
+- Never ask for budget.
+- Never invent project information.
+- Never mention internal workflow, database, memory or extraction.
+- Keep responses concise.
+
+Language:
+English -> English.
+Roman Telugu / Telugu-English -> Roman Telugu + English.
+Telugu script -> Telugu script.
+
+${params.instruction}
+`;
+
+    const userPrompt = `
+USER MESSAGE:
+${params.message}
+
+PROJECT:
+${JSON.stringify(
+  params.project ?? {},
+  null,
+  2,
+)}
+
+CLIENT:
+${JSON.stringify(
+  params.client ?? {},
+  null,
+  2,
+)}
+
+RECENT HISTORY:
+${JSON.stringify(
+  params.history.slice(-10),
+  null,
+  2,
+)}
+
+Respond only to the latest user message.
+`;
+
+    try {
+      const llm =
+        await this.llmService.generate({
+          systemPrompt,
+          userPrompt,
+        });
+
+      const content =
+        llm.content?.trim();
+
+      if (content) {
+        return content;
+      }
+    } catch {
+      // fallback
+    }
+
+    return this.fallbackResponse(
+      params.language,
+    );
+  }
+
+  /*
+   * ==========================================================
+   * FINAL RESPONSE
+   * ==========================================================
+   */
+
+  private async finalResponse(
+    input: {
+      conversationId?: string;
+    },
+    message: string,
+    intent: any,
+    decision: any,
+    project?: any,
+    client?: any,
+    pricing?: any,
+    timeline?: any,
+    workflow?: any,
+    proposal?: any,
+    options: string[] = [],
+  ) {
+    const finalMessage =
+      message?.trim() ||
+      'Tell me a little about what you would like to build.';
+
+    if (input.conversationId) {
+      await this.memoryService.saveMessage(
+        input.conversationId,
+        {
+          role: 'assistant',
+          content: finalMessage,
+          intent:
+            intent?.intent,
+          confidence:
+            intent?.confidence,
+        },
+      );
+    }
+
+    return {
+      message: finalMessage,
+      options,
+      intent,
+      decision,
+      workflow,
+      pricing,
+      timeline,
+      proposal,
+      llm: {
+        provider: 'openrouter',
+        model: 'aira-natural',
+      },
+    };
+  }
+
+  /*
+   * ==========================================================
+   * HELPERS
+   * ==========================================================
+   */
+
+  private hasEnoughForEstimate(
+    project: any,
+  ): boolean {
+    return Boolean(
+      project?.projectType &&
+      project?.industry &&
+      project?.goal &&
+      this.toList(
+        project?.features,
+      ).length > 0 &&
+      project?.technology &&
+      project?.seo,
+    );
+  }
+
+  private extractEmail(
     message: string,
   ): string | undefined {
-    const text =
-      message.toLowerCase();
+    const match =
+      message.match(
+        /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i,
+      );
 
-    if (
-      text.includes('no seo') ||
-      text.includes('without seo') ||
-      text.includes("don't need seo") ||
-      text.includes('dont need seo')
-    ) {
-      return 'No SEO';
+    return match?.[0];
+  }
+
+  private extractPhoneNumber(
+    message: string,
+  ): string | undefined {
+    const match =
+      message.match(
+        /(?:\+91[\s-]?)?[6-9]\d{9}/,
+      );
+
+    if (!match) {
+      return undefined;
     }
 
-    if (
-      text.includes('local seo')
-    ) {
-      return 'Local SEO';
-    }
+    return match[0]
+      .replace(/\D/g, '')
+      .replace(
+        /^91(?=\d{10}$)/,
+        '',
+      );
+  }
 
-    if (
-      text.includes('advanced seo')
-    ) {
-      return 'Advanced SEO';
-    }
+  private extractClientName(
+    message: string,
+  ): string | undefined {
+    const patterns = [
+      /my name is\s+([a-zA-Z][a-zA-Z\s]{1,40})(?:[.!?,]|$)/i,
+      /i am\s+([a-zA-Z][a-zA-Z\s]{1,40})(?:[.!?,]|$)/i,
+      /i'm\s+([a-zA-Z][a-zA-Z\s]{1,40})(?:[.!?,]|$)/i,
+      /this is\s+([a-zA-Z][a-zA-Z\s]{1,40})(?:[.!?,]|$)/i,
+    ];
 
-    if (
-      text.includes('basic seo')
-    ) {
-      return 'Basic SEO';
-    }
+    for (const pattern of patterns) {
+      const match =
+        message.match(pattern);
 
-    if (
-      text.includes('seo') ||
-      text.includes('google ranking') ||
-      text.includes('search engine')
-    ) {
-      return 'SEO optimization';
+      if (match?.[1]) {
+        return match[1].trim();
+      }
     }
 
     return undefined;
   }
 
-  /*
-   * ==========================================================
-   * TIMELINE
-   * ==========================================================
-   */
-
-  private extractTimeline(
+  private cleanSimpleAnswer(
     message: string,
-  ): string | undefined {
-    const text =
-      message.toLowerCase();
-
-    const weeks =
-      text.match(
-        /(\d+)\s*(?:weeks?|wks?)/i,
-      );
-
-    if (weeks?.[1]) {
-      return `${weeks[1]} weeks`;
-    }
-
-    const days =
-      text.match(
-        /(\d+)\s*(?:days?|working\s+days?)/i,
-      );
-
-    if (days?.[1]) {
-      return `${days[1]} days`;
-    }
-
-    const months =
-      text.match(
-        /(\d+)\s*(?:months?|mos?)/i,
-      );
-
-    if (months?.[1]) {
-      return `${months[1]} months`;
-    }
-
-    if (
-      text.includes('asap') ||
-      text.includes(
-        'as soon as possible',
+  ): string {
+    return message
+      .replace(
+        /^(my name is|i am|i'm|this is|business name is|our business name is)\s+/i,
+        '',
       )
-    ) {
-      return 'As soon as possible';
-    }
-
-    if (
-      text.includes('1 week')
-    ) {
-      return '1 week';
-    }
-
-    if (
-      text.includes('2 weeks')
-    ) {
-      return '2 weeks';
-    }
-
-    if (
-      text.includes('3–4 weeks') ||
-      text.includes('3-4 weeks')
-    ) {
-      return '3–4 weeks';
-    }
-
-    if (
-      text.includes('flexible')
-    ) {
-      return 'Flexible';
-    }
-
-    return undefined;
-  }
-
-  /*
-   * ==========================================================
-   * COMPLEXITY
-   * ==========================================================
-   */
-
-  private extractComplexity(
-    message: string,
-  ): string | undefined {
-    const text =
-      message.toLowerCase();
-
-    if (
-      text.includes('simple') ||
-      text.includes('basic') ||
-      text.includes('low complexity')
-    ) {
-      return 'Low';
-    }
-
-    if (
-      text.includes('moderate') ||
-      text.includes('medium')
-    ) {
-      return 'Medium';
-    }
-
-    if (
-      text.includes('complex') ||
-      text.includes('advanced') ||
-      text.includes(
-        'custom functionality',
+      .replace(
+        /[.!?,]+$/,
+        '',
       )
-    ) {
-      return 'High';
-    }
-
-    return undefined;
+      .trim();
   }
 
-  /*
-   * ==========================================================
-   * LANGUAGE
-   * ==========================================================
-   */
+  private toList(
+    value?: string | string[],
+  ): string[] {
+    if (!value) {
+      return [];
+    }
+
+    if (Array.isArray(value)) {
+      return value
+        .map(String)
+        .map((item) =>
+          item.trim(),
+        )
+        .filter(Boolean);
+    }
+
+    return value
+      .split(',')
+      .map((item) =>
+        item.trim(),
+      )
+      .filter(Boolean);
+  }
 
   private detectResponseLanguage(
     message: string,
@@ -2516,13 +2035,10 @@ Respond only to the user's latest message.
       'nenu',
       'naku',
       'naaku',
-      'na',
       'meeku',
       'meeru',
-      'mee',
       'cheppu',
       'cheppandi',
-      'kavali',
       'kavali',
       'entha',
       'em',
@@ -2534,7 +2050,6 @@ Respond only to the user's latest message.
       'ledu',
       'ledhu',
       'ivvu',
-      'ivvandi',
       'ippudu',
       'inka',
       'kuda',
@@ -2559,12 +2074,6 @@ Respond only to the user's latest message.
     return 'en';
   }
 
-  /*
-   * ==========================================================
-   * FALLBACK
-   * ==========================================================
-   */
-
   private fallbackResponse(
     language:
       | 'en'
@@ -2576,101 +2085,12 @@ Respond only to the user's latest message.
       return 'మీకు ఏం కావాలో చెప్పండి.';
     }
 
-    if (
-      language === 'te-en'
-    ) {
+    if (language === 'te-en') {
       return 'Meeku em kavalo cheppandi.';
     }
 
     return 'Tell me what you need.';
   }
-
-  /*
-   * ==========================================================
-   * ESTIMATE CHECK
-   * ==========================================================
-   */
-
-  private hasEnoughForEstimate(
-    project: any,
-  ): boolean {
-    return Boolean(
-      project?.projectType &&
-      project?.industry &&
-      project?.goal &&
-      project?.audience &&
-      project?.features &&
-      this.toList(
-        project.features,
-      ).length > 0 &&
-      project?.technology &&
-      project?.seo,
-    );
-  }
-
-  /*
-   * ==========================================================
-   * ALL REQUIREMENTS
-   * ==========================================================
-   */
-
-  private hasAllProjectRequirements(
-    project: any,
-  ): boolean {
-    return Boolean(
-      project?.name &&
-      project?.projectType &&
-      project?.industry &&
-      project?.goal &&
-      project?.audience &&
-      this.toList(
-        project?.features,
-      ).length > 0 &&
-      project?.technology &&
-      project?.seo &&
-      project?.timeline,
-    );
-  }
-
-  /*
-   * ==========================================================
-   * LIST
-   * ==========================================================
-   */
-
-  private toList(
-    value?: string | string[],
-  ): string[] {
-    if (!value) {
-      return [];
-    }
-
-    if (
-      Array.isArray(value)
-    ) {
-      return value
-        .map(String)
-        .map(
-          (item) =>
-            item.trim(),
-        )
-        .filter(Boolean);
-    }
-
-    return value
-      .split(',')
-      .map(
-        (item) =>
-          item.trim(),
-      )
-      .filter(Boolean);
-  }
-
-  /*
-   * ==========================================================
-   * GREETING
-   * ==========================================================
-   */
 
   private isGreeting(
     message: string,
@@ -2679,12 +2099,6 @@ Respond only to the user's latest message.
       message.trim(),
     );
   }
-
-  /*
-   * ==========================================================
-   * THANKS
-   * ==========================================================
-   */
 
   private isThanks(
     message: string,
