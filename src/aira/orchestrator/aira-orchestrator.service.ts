@@ -278,30 +278,52 @@ export class AiraOrchestratorService {
     }
 
     /*
-    ============================================================
-    9. AUTOMATIC TECHNOLOGY RECOMMENDATION
-    ============================================================
-    */
+============================================================
+9. TECHNOLOGY RECOMMENDATION
+============================================================
+*/
 
-    if (
-      project?.technology ===
-      'Recommended by AYORIX'
-    ) {
-      const recommendation =
-        this.recommendTechnology(
-          project,
-        );
+if (
+  expectedField === 'technology' &&
+  project?.technology ===
+    'Recommended by AYORIX'
+) {
+  const recommendation =
+    this.recommendTechnology(
+      project,
+    );
 
-      project =
-        await this.memoryService.updateProject(
-          project.id,
-          {
-            technology:
-              recommendation,
-          },
-        );
-    }
+  project =
+    await this.memoryService.updateProject(
+      project.id,
+      {
+        technology:
+          recommendation,
+      },
+    );
 
+  return this.response(
+    input,
+
+    `Based on your project requirements, I recommend ${recommendation}. It’s a strong choice for performance, scalability, and SEO.`,
+
+    intent,
+    decision,
+    project,
+    client,
+    undefined,
+    undefined,
+
+    {
+      shouldAskQuestion: false,
+      nextMissingField: 'seo',
+      currentStage: 'DISCOVERY',
+      nextStage: 'DISCOVERY',
+    },
+
+    [],
+  );
+}
     /*
     ============================================================
     10. CALCULATE PRICE + TIMELINE
@@ -776,20 +798,7 @@ export class AiraOrchestratorService {
             value,
           );
 
-        /*
-        OTHER
-        */
-
-        if (
-          selected.length === 0 &&
-          !this.isOtherOption(value)
-        ) {
-          selected.push(
-            this.cleanSimpleAnswer(
-              value,
-            ),
-          );
-        }
+        
 
         const merged = [
           ...new Set([
@@ -1057,7 +1066,7 @@ export class AiraOrchestratorService {
         'E-commerce',
         'Technology',
         'Professional Services',
-        'Other',
+        
       ],
 
       projectType: [
@@ -1067,7 +1076,7 @@ export class AiraOrchestratorService {
         'Portfolio Website',
         'Landing Page',
         'Not sure',
-        'Other',
+        
       ],
 
       goal: [
@@ -1078,7 +1087,7 @@ export class AiraOrchestratorService {
         'Bookings / Reservations',
         'Build brand presence',
         'Multiple goals',
-        'Other',
+        
       ],
 
       audience: [
@@ -1088,7 +1097,7 @@ export class AiraOrchestratorService {
         'Startups',
         'Students',
         'Professionals',
-        'Other',
+        
       ],
 
       features: [
@@ -1102,15 +1111,15 @@ export class AiraOrchestratorService {
         'Authentication',
         'Search',
         'Reviews / Testimonials',
-        'Other',
-        'Done',
+        
+        
       ],
 
       technology: [
         'React',
         'Next.js',
         'Not sure — recommend',
-        'Other',
+        
       ],
 
       seo: [
@@ -1181,26 +1190,7 @@ export class AiraOrchestratorService {
     return 'Next.js + TypeScript';
   }
 
-  /*
-  ============================================================
-  OTHER
-  ============================================================
-  */
 
-  private isOtherOption(
-    message: string,
-  ): boolean {
-    return [
-      'other',
-      'others',
-      'something else',
-      'none of these',
-    ].includes(
-      message
-        .toLowerCase()
-        .trim(),
-    );
-  }
 
   /*
   ============================================================
