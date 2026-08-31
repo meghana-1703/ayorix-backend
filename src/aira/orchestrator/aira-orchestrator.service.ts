@@ -209,62 +209,11 @@ export class AiraOrchestratorService {
     ============================================================
     */
 
-   const expectedField =
-  this.getNextField(
-    project,
-    client,
-  );
-
-/*
-==========================================================
-TECHNOLOGY RECOMMENDATION
-==========================================================
-*/
-
-if (
-  expectedField === 'technology' &&
-  this.isTechnologyRecommendation(message)
-) {
-  const recommendedTechnology =
-    this.recommendTechnology(project);
-
-  if (
-    input.conversationId &&
-    project?.id
-  ) {
-    project =
-      await this.memoryService.updateProject(
-        project.id,
-        {
-          technology:
-            recommendedTechnology,
-        },
+    const expectedField =
+      this.getNextField(
+        project,
+        client,
       );
-  }
-
-  return this.response(
-    input,
-    this.getTechnologyRecommendationMessage(
-      recommendedTechnology,
-      language,
-    ),
-    intent,
-    decision,
-    project,
-    client,
-    undefined,
-    undefined,
-    {
-      shouldAskQuestion: true,
-      nextMissingField: 'seo',
-      currentStage: 'TECHNOLOGY',
-      nextStage: 'SEO',
-    },
-    this.getQuestionOptions(
-      'seo',
-    ),
-  );
-}
 
     /*
     ============================================================
@@ -1185,77 +1134,73 @@ if (
   ============================================================
   */
 
- private isTechnologyRecommendation(
-  message: string,
-): boolean {
-  const text =
-    message
-      .toLowerCase()
-      .trim();
+  private recommendTechnology(
+    project: any,
+  ): string {
+    const type =
+      String(
+        project?.projectType ??
+        '',
+      ).toLowerCase();
 
-  return (
-    text === 'not sure — recommend' ||
-    text === 'not sure - recommend' ||
-    text === 'not sure recommend' ||
-    text === 'recommend' ||
-    text === 'aira recommend'
-  );
-}
+    const features =
+      this.toList(
+        project?.features,
+      ).map(
+        item =>
+          item.toLowerCase(),
+      );
 
-private recommendTechnology(
-  project: any,
-): string {
-  const projectType =
-    String(
-      project?.projectType ?? '',
-    ).toLowerCase();
+    /*
+    Web application / complex projects
+    */
 
-  const features =
-    this.toList(
-      project?.features,
-    ).map(
-      feature =>
-        feature.toLowerCase(),
+    if (
+      type.includes('web application') ||
+      features.includes('admin panel') ||
+      features.includes('authentication')
+    ) {
+      return 'Next.js + TypeScript';
+    }
+
+    /*
+    E-commerce
+    */
+
+    if (
+      type.includes('e-commerce') ||
+      type.includes('ecommerce')
+    ) {
+      return 'Next.js + TypeScript';
+    }
+
+    /*
+    Standard business websites
+    */
+
+    return 'Next.js + TypeScript';
+  }
+
+  /*
+  ============================================================
+  OTHER
+  ============================================================
+  */
+
+  private isOtherOption(
+    message: string,
+  ): boolean {
+    return [
+      'other',
+      'others',
+      'something else',
+      'none of these',
+    ].includes(
+      message
+        .toLowerCase()
+        .trim(),
     );
-
-  /*
-   * Web apps / complex functionality
-   */
-  if (
-    projectType.includes(
-      'web application',
-    ) ||
-    features.includes(
-      'admin panel',
-    ) ||
-    features.includes(
-      'authentication',
-    )
-  ) {
-    return 'Next.js';
   }
-
-  /*
-   * Business websites / ecommerce /
-   * portfolio / landing pages
-   */
-  return 'Next.js';
-}
-
-private getTechnologyRecommendationMessage(
-  technology: string,
-  language: Language,
-): string {
-  if (language === 'te') {
-    return `మీ project requirements బట్టి, నేను ${technology} recommend చేస్తున్నాను. ఇది performance, scalability మరియు SEO కి strong choice.`;
-  }
-
-  if (language === 'te-en') {
-    return `Mee project requirements batti, nenu ${technology} recommend chesthunnanu. Idi performance, scalability and SEO ki strong choice.`;
-  }
-
-  return `Based on your project requirements, I recommend ${technology}. It’s a strong choice for performance, scalability, and SEO.`;
-}
 
   /*
   ============================================================
@@ -2128,21 +2073,6 @@ Respond naturally to the latest user message.
         .toLowerCase()
         .trim(),
     );
-  }
-
-  private isOtherOption(
-    message: string,
-  ): boolean {
-    const text =
-      message
-        .toLowerCase()
-        .trim();
-
-    return [
-      'other',
-      'something else',
-      'other features',
-    ].includes(text);
   }
 
   /*
