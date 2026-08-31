@@ -215,6 +215,41 @@ export class AiraOrchestratorService {
         client,
       );
 
+      /*
+============================================================
+6A. TECHNOLOGY RECOMMENDATION ACKNOWLEDGEMENT
+============================================================
+*/
+
+if (
+  project?.technology &&
+  project.technology !==
+    'Recommended by AYORIX' &&
+  expectedField === 'seo' &&
+  this.isAcknowledgement(message)
+) {
+  return this.response(
+    input,
+    this.questionText(
+      'seo',
+      language,
+    ),
+    intent,
+    decision,
+    project,
+    client,
+    undefined,
+    undefined,
+    {
+      shouldAskQuestion: true,
+      nextMissingField: 'seo',
+      currentStage: 'DISCOVERY',
+      nextStage: 'DISCOVERY',
+    },
+    this.getQuestionOptions('seo'),
+  );
+}
+
     /*
     ============================================================
     7. SAVE ANSWER
@@ -2041,6 +2076,36 @@ Respond naturally to the latest user message.
       ),
     );
   }
+
+  /*
+============================================================
+ACKNOWLEDGEMENT
+============================================================
+*/
+
+private isAcknowledgement(
+  message: string,
+): boolean {
+  return [
+    'ok',
+    'okay',
+    'thanks',
+    'thank you',
+    'thankyou',
+    'sure',
+    'great',
+    'good',
+    'fine',
+    'alright',
+    'sounds good',
+    'perfect',
+    'got it',
+  ].includes(
+    message
+      .toLowerCase()
+      .trim(),
+  );
+}
 
   /*
   ============================================================
